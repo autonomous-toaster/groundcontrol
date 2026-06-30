@@ -15,6 +15,7 @@ mod grounders;
 mod parse;
 mod types;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
@@ -645,14 +646,32 @@ fn print_human(output: &CheckOutput) {
 
 // ── Init command ──
 
-/// Marker comment checked before appending grounding rules.
-const GROUNDCONTROL_MARKER: &str = "# groundcontrol init";
+const GROUNDCONTROL_CONTEXT: &str = "\
+Every task reference in a spec MUST map to a real task ID.\n\
+Use explicit N.M IDs (e.g. 'T2.1') — not descriptions like 'the migration step'.\n\
+Task descriptions in tasks.md become aliases for fuzzy matching, so write\n\
+descriptive descriptions that capture the task's purpose.";
 
-/// Config content to write when openspec/config.yaml does not exist.
-const BOOTSTRAP_CONFIG: &str = "schema: spec-driven\n\n# groundcontrol init\ncontext: |-\n  groundcontrol checks that NL requirement statements can be grounded to the plan's\n  task vocabulary. Every task reference in a spec MUST map to a real task ID.\n  Use explicit N.M IDs (e.g. 'T2.1') — not descriptions like 'the migration step'.\n  Task descriptions in tasks.md become aliases for fuzzy matching, so write\n  descriptive descriptions that capture the task's purpose.\n\nrules:\n  specs:\n    - \"Reference tasks by explicit ID: 'T2.1' not 'the migration step'\"\n    - \"Use parenthetical syntax for task IDs: 'the migration step (T2.1)'\"\n    - \"BEFORE requires two task IDs: 'T2.1 SHALL complete BEFORE T3.1 SHALL run'\"\n    - \"ALWAYS requires one task ID: 'ALWAYS T2.1 SHALL validate input'\"\n  tasks:\n    - \"Write descriptive task descriptions — they become aliases for grounding\"\n";
-
-/// Suffix appended to existing config when the marker is absent.
-const BOOTSTRAP_SUFFIX: &str = "\n\n# groundcontrol init\ncontext: |-\n  groundcontrol checks that NL requirement statements can be grounded to the plan's\n  task vocabulary. Every task reference in a spec MUST map to a real task ID.\n  Use explicit N.M IDs (e.g. 'T2.1') — not descriptions like 'the migration step'.\n  Task descriptions in tasks.md become aliases for fuzzy matching, so write\n  descriptive descriptions that capture the task's purpose.\n\nrules:\n  specs:\n    - \"Reference tasks by explicit ID: 'T2.1' not 'the migration step'\"\n    - \"Use parenthetical syntax for task IDs: 'the migration step (T2.1)'\"\n    - \"BEFORE requires two task IDs: 'T2.1 SHALL complete BEFORE T3.1 SHALL run'\"\n    - \"ALWAYS requires one task ID: 'ALWAYS T2.1 SHALL validate input'\"\n  tasks:\n    - \"Write descriptive task descriptions — they become aliases for grounding\"\n";
+fn groundcontrol_rules() -> BTreeMap<String, Vec<String>> {
+    let mut rules = BTreeMap::new();
+    rules.insert(
+        "specs".to_string(),
+        vec![
+            "Reference tasks by explicit ID: 'T2.1' not 'the migration step'".to_string(),
+            "Use parenthetical syntax for task IDs: 'the migration step (T2.1)'".to_string(),
+            "BEFORE requires two task IDs: 'T2.1 SHALL complete BEFORE T3.1 SHALL run'".to_string(),
+            "ALWAYS requires one task ID: 'ALWAYS T2.1 SHALL validate input'".to_string(),
+        ],
+    );
+    rules.insert(
+        "tasks".to_string(),
+        vec![
+            "Write descriptive task descriptions — they become aliases for grounding"
+                .to_string(),
+        ],
+    );
+    rules
+}
 
 fn run_init(project_root: Option<String>) -> anyhow::Result<()> {
     let root = match project_root {
@@ -665,33 +684,97 @@ fn run_init(project_root: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read openspec/config.yaml, check for GROUNDCONTROL_MARKER, append BOOTSTRAP_SUFFIX if missing.UFFIX if missing.
-/// If the file does not exist, create it with BOOTSTRAP_CONFIG.
+/// Merge groundcontrol's context and rules into openspec/config.yaml using YAML-aware merge.
+/// If the file does not exist, creates it with schema + groundcontrol content.
 fn merge_config(path: &std::path::Path) -> anyhow::Result<()> {
     if !path.exists() {
-        // Create parent directory if needed
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, BOOTSTRAP_CONFIG)?;
+        let config = create_fresh_config();
+        std::fs::write(path, config)?;
         return Ok(());
     }
 
     let content = std::fs::read_to_string(path)?;
-    if content.contains(GROUNDCONTROL_MARKER) {
-        // Marker present — no-op
-        return Ok(());
+    let existing: serde_yaml::Value = serde_yaml::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
+
+    let merged = yaml_merge(&existing, GROUNDCONTROL_CONTEXT, &groundcontrol_rules());
+    let output = serde_yaml::to_string(&merged)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
+
+    let output = format!("# groundcontrol init\n{}", output);
+    std::fs::write(path, output)?;
+    Ok(())
+}
+
+/// Create a fresh config with schema + groundcontrol context and rules.
+fn create_fresh_config() -> String {
+    let mut config = serde_yaml::Mapping::new();
+    config.insert(
+        serde_yaml::Value::String("schema".to_string()),
+        serde_yaml::Value::String("spec-driven".to_string()),
+    );
+    let merged = yaml_merge(
+        &serde_yaml::Value::Mapping(config),
+        GROUNDCONTROL_CONTEXT,
+        &groundcontrol_rules(),
+    );
+    let output = serde_yaml::to_string(&merged).unwrap();
+    format!("# groundcontrol init\n{}", output)
+}
+
+/// Merge new context and rules into an existing YAML value.
+/// Context is appended with a blank line separator.
+/// Rules are merged per artifact type, deduplicating by exact string match.
+fn yaml_merge(
+    existing: &serde_yaml::Value,
+    new_context: &str,
+    new_rules: &BTreeMap<String, Vec<String>>,
+) -> serde_yaml::Value {
+    let mut merged = existing.clone();
+
+    // Merge context: append with blank line separator, skip if already present
+    match merged.get_mut("context") {
+        Some(serde_yaml::Value::String(ctx)) => {
+            let trimmed_new = new_context.trim();
+            if !ctx.contains(trimmed_new) {
+                let combined = format!("{}\n\n{}", ctx.trim(), trimmed_new);
+                *ctx = combined;
+            }
+        }
+        _ => {
+            merged["context"] = serde_yaml::Value::String(new_context.to_string());
+        }
     }
 
-    // Append suffix (ensure trailing newline before appending)
-    let trimmed = content.trim_end();
-    let new_content = if trimmed.is_empty() {
-        BOOTSTRAP_SUFFIX.to_string()
-    } else {
-        format!("{}\n{}", trimmed, BOOTSTRAP_SUFFIX)
+    // Merge rules: add new items per artifact type, deduplicating
+    let mut rules = match merged.get("rules") {
+        Some(serde_yaml::Value::Mapping(m)) => m.clone(),
+        _ => serde_yaml::Mapping::new(),
     };
-    std::fs::write(path, new_content)?;
-    Ok(())
+
+    for (artifact_type, new_items) in new_rules {
+        let key = serde_yaml::Value::String(artifact_type.clone());
+        let existing_items = match rules.get(&key) {
+            Some(serde_yaml::Value::Sequence(s)) => s.clone(),
+            _ => serde_yaml::Sequence::new(),
+        };
+
+        let mut merged_items = existing_items.clone();
+        for item in new_items {
+            let item_val = serde_yaml::Value::String(item.clone());
+            if !merged_items.contains(&item_val) {
+                merged_items.push(item_val);
+            }
+        }
+
+        rules.insert(key, serde_yaml::Value::Sequence(merged_items));
+    }
+
+    merged["rules"] = serde_yaml::Value::Mapping(rules);
+    merged
 }
 
 #[cfg(test)]
@@ -969,39 +1052,41 @@ mod tests {
         merge_config(&path).unwrap();
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains(GROUNDCONTROL_MARKER));
+        assert!(content.contains("# groundcontrol init"));
         assert!(content.contains("Reference tasks by explicit ID"));
         assert!(content.contains("Write descriptive task descriptions"));
+        // Context must not cite the tool
+        assert!(!content.contains("groundcontrol checks"));
     }
 
     #[test]
-    fn test_merge_config_marker_present_is_noop() {
+    fn test_merge_config_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("openspec").join("config.yaml");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // Write a config that already has the marker
-        let existing = "schema: spec-driven\n\n# groundcontrol init\ncontext: |-\n  existing rules\n";
-        std::fs::write(&path, existing).unwrap();
-        let before = std::fs::read_to_string(&path).unwrap();
         merge_config(&path).unwrap();
-        let after = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(before, after);
+        let after_first = std::fs::read_to_string(&path).unwrap();
+        // Run again — should not add duplicates
+        merge_config(&path).unwrap();
+        let after_second = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after_first, after_second);
     }
 
     #[test]
-    fn test_merge_config_appends_suffix() {
+    fn test_merge_config_preserves_existing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("openspec").join("config.yaml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let existing = "schema: spec-driven\n";
+        let existing = "schema: spec-driven\ncontext: |-\n  Use conventional commits\n";
         std::fs::write(&path, existing).unwrap();
         merge_config(&path).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains(GROUNDCONTROL_MARKER));
+        // Original content preserved
+        assert!(content.contains("Use conventional commits"));
+        // New content added
         assert!(content.contains("Reference tasks by explicit ID"));
         assert!(content.contains("Write descriptive task descriptions"));
-        // Original content preserved
-        assert!(content.starts_with("schema: spec-driven"));
+        // Context must not cite the tool
+        assert!(!content.contains("groundcontrol checks"));
     }
 
     #[test]
@@ -1010,8 +1095,8 @@ mod tests {
         let path = dir.path().join("openspec").join("config.yaml");
         merge_config(&path).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
-        // Context block
-        assert!(content.contains("groundcontrol checks that NL requirement statements"));
+        // Context block — tool-agnostic
+        assert!(content.contains("Every task reference in a spec MUST map to a real task ID"));
         assert!(content.contains("Use explicit N.M IDs"));
         assert!(content.contains("descriptive descriptions that capture the task's purpose"));
         // Specs rules
@@ -1021,5 +1106,42 @@ mod tests {
         assert!(content.contains("ALWAYS requires one task ID"));
         // Tasks rules
         assert!(content.contains("Write descriptive task descriptions"));
+        // Must not cite the tool
+        assert!(!content.contains("groundcontrol checks"));
+    }
+
+    #[test]
+    fn test_yaml_merge_context_appends() {
+        let existing: serde_yaml::Value = serde_yaml::from_str(
+            "context: |-\n  Original context\n",
+        )
+        .unwrap();
+        let mut rules = BTreeMap::new();
+        rules.insert("specs".to_string(), vec![]);
+        let merged = yaml_merge(&existing, "New context", &rules);
+        let ctx = merged["context"].as_str().unwrap();
+        assert!(ctx.contains("Original context"));
+        assert!(ctx.contains("New context"));
+    }
+
+    #[test]
+    fn test_yaml_merge_rules_dedup() {
+        let existing: serde_yaml::Value = serde_yaml::from_str(
+            "rules:\n  specs:\n    - \"Existing rule\"\n",
+        )
+        .unwrap();
+        let mut rules = BTreeMap::new();
+        rules.insert(
+            "specs".to_string(),
+            vec![
+                "Existing rule".to_string(),
+                "New rule".to_string(),
+            ],
+        );
+        let merged = yaml_merge(&existing, "", &rules);
+        let specs = merged["rules"]["specs"].as_sequence().unwrap();
+        assert_eq!(specs.len(), 2);
+        assert!(specs.iter().any(|v| v.as_str() == Some("Existing rule")));
+        assert!(specs.iter().any(|v| v.as_str() == Some("New rule")));
     }
 }
