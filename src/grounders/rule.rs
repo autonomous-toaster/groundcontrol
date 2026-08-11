@@ -74,10 +74,22 @@ impl Grounder for RuleGrounder {
             };
 
             if confidence > 0.0 {
+                let diagnostic = if args.len() == expected && expected > 0 {
+                    format!(
+                        "predicate {} matched; found all {} expected argument(s)",
+                        pred_name, expected
+                    )
+                } else {
+                    format!(
+                        "predicate {} matched but expected {} argument(s), found {} — partial ground",
+                        pred_name, expected, args.len()
+                    )
+                };
                 candidates.push(GroundedAtom {
                     predicate: pred_name.to_string(),
                     arguments: args,
                     confidence,
+                    diagnostic,
                 });
             }
         }

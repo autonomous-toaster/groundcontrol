@@ -839,6 +839,7 @@ mod tests {
                 predicate: "BEFORE".into(),
                 arguments: vec!["T1.1".into(), "T1.2".into()],
                 confidence: 0.95,
+                diagnostic: "found 2/2 expected arguments".into(),
             }],
             status: GroundingStatus::Grounded,
         };
@@ -882,6 +883,7 @@ mod tests {
                 predicate: "BEFORE".into(),
                 arguments: vec!["T2.1".into(), "T2.2".into()],
                 confidence: 0.72,
+                diagnostic: "predicate matched but expected 2 argument(s), found 1 — partial ground".into(),
             }],
             status: GroundingStatus::Ambiguous,
         };
@@ -936,6 +938,7 @@ mod tests {
                 predicate: "BEFORE".into(),
                 arguments: vec!["T3.1".into()],
                 confidence: 0.5,
+                diagnostic: "predicate matched but expected 2 argument(s), found 1 — partial ground".into(),
             }],
             status: GroundingStatus::Ambiguous,
         };

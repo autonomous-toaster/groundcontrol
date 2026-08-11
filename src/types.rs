@@ -62,6 +62,10 @@ pub struct GroundedAtom {
     pub predicate: String,
     pub arguments: Vec<String>,
     pub confidence: f64,
+    /// Human-readable explanation of why this confidence was assigned (e.g.
+    /// how many of the expected predicate arguments were found). Used by
+    /// consumers (e.g. veriplan) to surface transparent grounding feedback.
+    pub diagnostic: String,
 }
 
 /// Overall status of a grounding attempt.
@@ -221,6 +225,7 @@ mod tests {
             predicate: "BEFORE".into(),
             arguments: vec!["T1.1".into(), "T1.2".into()],
             confidence: 0.95,
+            diagnostic: "found 2/2 expected arguments".into(),
         };
         assert_eq!(atom.predicate, "BEFORE");
         assert_eq!(atom.arguments.len(), 2);
