@@ -13,6 +13,10 @@ use crate::types::{
     MatchKind, PredicateDef, Signature,
 };
 
+use identifiers::{appears_in, contains_name, extract_absent_identifiers};
+
+mod identifiers;
+
 /// Predicate keyword groups and their argument ordering.
 const PREDICATE_KEYWORDS: &[(&str, &[&str])] = &[
     (
@@ -75,15 +79,20 @@ impl Grounder for RuleGrounder {
             let args = assign_arguments(pred_name, &matched_constants, nl, &lower, allow_alias);
 
             // 5. Distinctness: a predicate that distinguishes its slots must not
-            // receive the same constant twice.
-            let repeated =
-                pred_def.is_some_and(distinguishes_slots) && has_repeated_constant(&args);
+            // receive the same constant twice. Only a *name* match in both slots
+            // is a contradiction — the author wrote one task where two are
+            // required. An alias that wins both slots is a weak binding, which
+            // is our fault and is reported as low confidence instead of being
+            // blamed on the spec.
+            // Either kind of repeat is a weak binding, so confidence drops; only
+            // a name repeat is classified Contradictory (see `classify`).
+            let repeats = has_repeated_constant(&args);
 
             // 6. Structural confidence scoring
             let exact = !args.is_empty() && args.iter().all(BoundArgument::is_exact);
             let confidence = if args.is_empty() {
                 0.0
-            } else if repeated {
+            } else if repeats {
                 0.5
             } else {
                 match pred_def.map(|p| p.arguments.len()) {
@@ -101,8 +110,7 @@ impl Grounder for RuleGrounder {
             };
 
             if confidence > 0.0 {
-                let diagnostic =
-                    diagnostic_for(pred_name, pred_def, &args, repeated, &absent_identifiers);
+                let diagnostic = diagnostic_for(pred_name, pred_def, &args, &absent_identifiers);
                 candidates.push(GroundedAtom {
                     predicate: pred_name.to_string(),
                     arguments: args,
@@ -140,14 +148,22 @@ fn diagnostic_for(
     pred_name: &str,
     pred_def: Option<&PredicateDef>,
     args: &[BoundArgument],
-    repeated: bool,
     absent_identifiers: &[String],
 ) -> String {
     if args.is_empty() {
         return format!("predicate {} matched but no argument was found", pred_name);
     }
-    if repeated {
-        let (first, second) = repeated_slot_pair(args).unwrap_or((0, 1));
+    if has_repeated_constant(args) {
+        let Some((first, second)) = name_repeated_pair(args) else {
+            // Two slots bound the same constant, but at least one by alias:
+            // the binding is too weak to fill the slots, so say so honestly
+            // instead of blaming the statement.
+            return format!(
+                "one constant ('{}') was bound to both slots, at least one by alias — \
+                 name the tasks explicitly",
+                args[0].constant,
+            );
+        };
         let slot = |i: usize| {
             pred_def
                 .and_then(|p| p.arguments.get(i))
@@ -200,16 +216,6 @@ fn diagnostic_for(
     format!("matched by alias: {}", aliases.join(", "))
 }
 
-/// Indices of the first pair of slots holding the same constant.
-fn repeated_slot_pair(args: &[BoundArgument]) -> Option<(usize, usize)> {
-    args.iter().enumerate().find_map(|(i, a)| {
-        args.iter()
-            .skip(i + 1)
-            .position(|b| b.constant == a.constant)
-            .map(|j| (i, i + 1 + j))
-    })
-}
-
 /// Decide the overall status. Order matters: a contradiction is reported even
 /// when another candidate is grounded, and an explainable shortfall is
 /// `Incomplete` rather than the misleading `Ambiguous`.
@@ -223,7 +229,7 @@ fn classify(
             .iter()
             .find(|p| p.name == c.predicate)
             .is_some_and(distinguishes_slots)
-            && has_repeated_constant(&c.arguments)
+            && name_repeated_pair(&c.arguments).is_some()
     };
 
     if candidates.is_empty() {
@@ -271,126 +277,21 @@ fn has_repeated_constant(args: &[BoundArgument]) -> bool {
     args.iter().any(|a| !seen.insert(a.constant.as_str()))
 }
 
-// ── Absent identifiers ──
-
-/// Longest token we are willing to consider a constant-shaped identifier.
-const MAX_IDENTIFIER_LEN: usize = 12;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CharClass {
-    Alpha,
-    Digit,
-    Other,
-}
-
-fn class_of(c: char) -> CharClass {
-    if c.is_ascii_digit() {
-        CharClass::Digit
-    } else if c.is_alphabetic() {
-        CharClass::Alpha
-    } else {
-        CharClass::Other
-    }
-}
-
-/// Split a name into maximal runs of the same character class.
-/// `T1.1` → [Alpha, Digit, Other, Digit].
-fn name_shape(name: &str) -> Vec<CharClass> {
-    let mut shape = Vec::new();
-    for c in name.chars() {
-        let class = class_of(c);
-        if shape.last() != Some(&class) {
-            shape.push(class);
+/// The first pair of slots that hold the same constant *and both matched by
+/// name* — i.e. the author explicitly named one task twice.
+fn name_repeated_pair(args: &[BoundArgument]) -> Option<(usize, usize)> {
+    args.iter().enumerate().find_map(|(i, a)| {
+        if !a.is_exact() {
+            return None;
         }
-    }
-    shape
+        args.iter()
+            .enumerate()
+            .skip(i + 1)
+            .find(|(_, b)| b.constant == a.constant && b.is_exact())
+            .map(|(j, _)| (i, j))
+    })
 }
 
-/// Find tokens in the text that have the shape of a constant of a declared
-/// type but are not provided by any constant of that type.
-///
-/// The shape is inferred from the signature itself: each constant type
-/// contributes its longest constant name, and its run structure is the pattern
-/// to match. This keeps the grounder domain-agnostic — no task-ID syntax is
-/// hard-coded anywhere.
-fn extract_absent_identifiers(nl: &str, sig: &Signature) -> Vec<String> {
-    // Longest constant name per type; its shape is the type's identifier pattern.
-    let mut patterns: Vec<(Vec<CharClass>, usize)> = Vec::new();
-    for type_def in &sig.types {
-        let Some(longest) = sig
-            .constants
-            .iter()
-            .filter(|c| c.type_name == type_def.name)
-            .map(|c| c.name.as_str())
-            .max_by_key(|n| n.chars().count())
-        else {
-            continue;
-        };
-        let shape = name_shape(longest);
-        // A shape with a single run (e.g. all-alphabetic names) carries no
-        // structure to match on and would match ordinary words.
-        if shape.len() < 2 {
-            continue;
-        }
-        let max_len = longest.chars().count().min(MAX_IDENTIFIER_LEN);
-        patterns.push((shape, max_len));
-    }
-    if patterns.is_empty() {
-        return Vec::new();
-    }
-
-    let known: std::collections::HashSet<&str> =
-        sig.constants.iter().map(|c| c.name.as_str()).collect();
-    let chars: Vec<char> = nl.chars().collect();
-    let mut absent: Vec<String> = Vec::new();
-
-    // For each start position, try every length and shape; record the longest
-    // match so that trailing punctuation is not appended to the identifier.
-    let mut i = 0;
-    while i < chars.len() {
-        let mut best: Option<usize> = None;
-        let limit = (chars.len() - i).min(MAX_IDENTIFIER_LEN);
-        for len in 2..=limit {
-            let candidate: String = chars[i..i + len].iter().collect();
-            let shape = name_shape(&candidate);
-            if fits_any(&shape, len, &patterns) {
-                best = Some(len);
-            }
-        }
-        match best {
-            Some(len) => {
-                let candidate: String = chars[i..i + len].iter().collect();
-                if !known.contains(candidate.as_str()) && !absent.contains(&candidate) {
-                    absent.push(candidate);
-                }
-                i += len;
-            }
-            None => i += 1,
-        }
-    }
-    absent
-}
-
-/// Does a candidate's shape match one of the type patterns?
-/// Identifiers start with a letter; this keeps us off numbers in prose.
-fn fits_any(shape: &[CharClass], len: usize, patterns: &[(Vec<CharClass>, usize)]) -> bool {
-    shape.first() == Some(&CharClass::Alpha)
-        && patterns
-            .iter()
-            .any(|(pattern, max_len)| len <= *max_len && shape == pattern.as_slice())
-}
-
-/// Check if a constant appears in the NL text (by name or alias).
-fn appears_in(c: &ConstantDef, nl: &str, lower: &str) -> bool {
-    // Exact name match (e.g., "T2.1")
-    if nl.contains(&c.name) {
-        return true;
-    }
-    // Alias match (e.g., "migration" from task description)
-    c.aliases.iter().any(|a| lower.contains(a.as_str()))
-}
-
-/// Assign arguments to slots based on predicate-specific heuristics.
 fn assign_arguments(
     pred_name: &str,
     matched: &[&ConstantDef],
@@ -398,7 +299,6 @@ fn assign_arguments(
     lower: &str,
     allow_alias: bool,
 ) -> Vec<BoundArgument> {
-    let find = |c: &ConstantDef, slice: &str| find_match(c, slice, allow_alias);
     let take = |n: usize| -> Vec<BoundArgument> {
         matched
             .iter()
@@ -413,8 +313,8 @@ fn assign_arguments(
             if let Some(pos) = lower.find("before") {
                 let before_text = &nl[..pos];
                 let after_text = &nl[pos + 6..];
-                let before_match = matched.iter().find_map(|c| find(c, before_text));
-                let after_match = matched.iter().find_map(|c| find(c, after_text));
+                let before_match = bind_slot(matched, before_text, allow_alias);
+                let after_match = bind_slot(matched, after_text, allow_alias);
                 let mut args = Vec::new();
                 if let Some(b) = before_match {
                     args.push(b);
@@ -432,8 +332,8 @@ fn assign_arguments(
             if let Some(pos) = lower.find("after") {
                 let before_text = &nl[..pos];
                 let after_text = &nl[pos + 5..];
-                let before_match = matched.iter().find_map(|c| find(c, before_text));
-                let after_match = matched.iter().find_map(|c| find(c, after_text));
+                let before_match = bind_slot(matched, before_text, allow_alias);
+                let after_match = bind_slot(matched, after_text, allow_alias);
                 let mut args = Vec::new();
                 // AFTER: the thing before "after" is the later task
                 if let Some(a) = after_match {
@@ -459,8 +359,8 @@ fn assign_arguments(
                 } else {
                     ""
                 };
-                let trigger = matched.iter().find_map(|c| find(c, trigger_text));
-                let consequent = matched.iter().find_map(|c| find(c, consequent_text));
+                let trigger = bind_slot(matched, trigger_text, allow_alias);
+                let consequent = bind_slot(matched, consequent_text, allow_alias);
                 let mut args = Vec::new();
                 if let Some(t) = trigger {
                     args.push(t);
@@ -481,20 +381,29 @@ fn assign_arguments(
     }
 }
 
-/// Find how a constant occurs in a slice: by name when possible, else by alias.
-/// Alias matching is skipped when `allow_alias` is false.
-fn find_match(c: &ConstantDef, slice: &str, allow_alias: bool) -> Option<BoundArgument> {
-    if slice.contains(&c.name) {
+/// Bind one slot to a constant, preferring an explicit name over an alias.
+///
+/// Two passes: a constant the text names literally always wins, so an
+/// alias-only constant can never displace the one the author wrote. Alias
+/// matching is skipped entirely when `allow_alias` is false.
+fn bind_slot(matched: &[&ConstantDef], slice: &str, allow_alias: bool) -> Option<BoundArgument> {
+    if let Some(c) = matched
+        .iter()
+        .find(|c| contains_name(slice, &c.name))
+        .copied()
+    {
         return Some(BoundArgument::by_name(&c.name));
     }
     if !allow_alias {
         return None;
     }
     let lower = slice.to_lowercase();
-    c.aliases
-        .iter()
-        .find(|a| lower.contains(a.as_str()))
-        .map(|a| BoundArgument::by_alias(&c.name, a))
+    matched.iter().find_map(|c| {
+        c.aliases
+            .iter()
+            .find(|a| contains_name(&lower, &a.to_lowercase()))
+            .map(|a| BoundArgument::by_alias(&c.name, a))
+    })
 }
 
 #[cfg(test)]

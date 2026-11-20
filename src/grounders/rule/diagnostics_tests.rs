@@ -334,3 +334,122 @@ fn both_ground(sig: &mut Signature) -> crate::types::GroundingResult {
     sig.constants.pop();
     RuleGrounder.ground("At most one of T1.1, T1.1 SHALL be active", sig)
 }
+
+// ── Identifier boundaries (veriplan corpus regression) ──
+
+/// A phase's tasks plus its first task, which is a prefix of the rest.
+fn prefix_sig() -> Signature {
+    let mk = |n: &str| ConstantDef {
+        name: n.into(),
+        type_name: "task_id".into(),
+        aliases: vec![],
+    };
+    Signature {
+        types: vec![TypeDef {
+            name: "task_id".into(),
+        }],
+        predicates: vec![PredicateDef {
+            name: "BEFORE".into(),
+            arguments: vec![
+                ArgSlot {
+                    name: "earlier".into(),
+                    type_name: "task_id".into(),
+                },
+                ArgSlot {
+                    name: "later".into(),
+                    type_name: "task_id".into(),
+                },
+            ],
+        }],
+        constants: vec![
+            mk("T5.1"),
+            mk("T5.10"),
+            mk("T5.12"),
+            mk("T5.15"),
+            mk("T5.16"),
+        ],
+    }
+}
+
+#[test]
+fn test_prefix_name_does_not_match_inside_longer_id() {
+    let sig = prefix_sig();
+    // T5.1 is a prefix of T5.15/T5.16: it must not be considered referenced.
+    let result = RuleGrounder.ground(
+        "T5.15 SHALL admit an input under a required idempotency key \
+         BEFORE T5.16 SHALL reject a duplicate key",
+        &sig,
+    );
+    assert_eq!(result.candidates[0].names(), vec!["T5.15", "T5.16"]);
+    assert_eq!(result.status, GroundingStatus::Grounded);
+}
+
+#[test]
+fn test_prefix_name_does_not_create_a_false_contradiction() {
+    let sig = prefix_sig();
+    let mut sig = sig;
+    sig.constants.push(ConstantDef {
+        name: "T3.12".into(),
+        type_name: "task_id".into(),
+        aliases: vec![],
+    });
+    sig.constants.push(ConstantDef {
+        name: "T3.13".into(),
+        type_name: "task_id".into(),
+        aliases: vec![],
+    });
+    let result = RuleGrounder.ground(
+        "T3.12 SHALL serve the OpenAPI document BEFORE T3.13 SHALL serve the schema",
+        &sig,
+    );
+    assert_ne!(result.status, GroundingStatus::Contradictory);
+    assert_eq!(result.candidates[0].names(), vec!["T3.12", "T3.13"]);
+}
+
+#[test]
+fn test_trailing_sentence_dot_still_matches() {
+    let sig = prefix_sig();
+    let result = RuleGrounder.ground("T5.15 SHALL run BEFORE T5.16 SHALL stop.", &sig);
+    assert_eq!(result.candidates[0].names(), vec!["T5.15", "T5.16"]);
+}
+
+#[test]
+fn test_name_match_beats_alias_match_in_a_slot() {
+    // T5.1's alias describes the first phrase; T5.15 is named outright.
+    let mut sig = prefix_sig();
+    sig.constants[0].aliases = vec!["admit an input".into()];
+    let result = RuleGrounder.ground(
+        "T5.15 SHALL admit an input BEFORE T5.16 SHALL reject it",
+        &sig,
+    );
+    assert_eq!(result.candidates[0].names(), vec!["T5.15", "T5.16"]);
+}
+
+#[test]
+fn test_alias_double_binding_is_not_a_contradiction() {
+    // Both slots can only be filled by the same alias: a weak binding, not a
+    // spec bug. It must not be reported as Contradictory.
+    let mut sig = prefix_sig();
+    sig.constants = vec![ConstantDef {
+        name: "T5.1".into(),
+        type_name: "task_id".into(),
+        aliases: vec!["admit".into()],
+    }];
+    let result = RuleGrounder.ground("admit the input BEFORE admit the output", &sig);
+    assert_ne!(result.status, GroundingStatus::Contradictory);
+    assert_ne!(result.status, GroundingStatus::Grounded);
+    assert_eq!(result.status, GroundingStatus::Ambiguous);
+    assert!(result.candidates[0].diagnostic.contains("by alias"));
+}
+
+#[test]
+fn test_named_twice_is_still_a_contradiction() {
+    let mut sig = prefix_sig();
+    sig.constants.push(ConstantDef {
+        name: "T5.15".into(),
+        type_name: "task_id".into(),
+        aliases: vec![],
+    });
+    let result = RuleGrounder.ground("T5.15 SHALL write BEFORE T5.15 SHALL seal", &sig);
+    assert_eq!(result.status, GroundingStatus::Contradictory);
+}
