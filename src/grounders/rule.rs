@@ -3,8 +3,14 @@
 //! No ML dependency. Works well for structured OpenSpec specs
 //! that use explicit task IDs (T1.3) and temporal keywords.
 
+//!
+//! Grounding is structural: the result reports *why* a statement failed to
+//! ground (absent identifier, short argument list, repeated slot, ambiguous
+//! alias match) rather than collapsing every failure into one status.
+
 use crate::types::{
-    ConstantDef, GroundedAtom, Grounder, GroundingResult, GroundingStatus, Signature,
+    BoundArgument, ConstantDef, GroundedAtom, Grounder, GroundingResult, GroundingStatus,
+    PredicateDef, Signature,
 };
 
 /// Predicate keyword groups and their argument ordering.
@@ -41,6 +47,7 @@ pub struct RuleGrounder;
 impl Grounder for RuleGrounder {
     fn ground(&self, nl: &str, sig: &Signature) -> GroundingResult {
         let lower = nl.to_lowercase();
+        let absent_identifiers = extract_absent_identifiers(nl, sig);
         let mut candidates = Vec::new();
 
         for (pred_name, keywords) in PREDICATE_KEYWORDS {
@@ -60,23 +67,44 @@ impl Grounder for RuleGrounder {
             // 3. Find the predicate definition
             let pred_def = sig.predicates.iter().find(|p| p.name == *pred_name);
 
-            // 4. Assign arguments based on predicate-specific positional heuristics
-            let args = assign_arguments(pred_name, &matched_constants, nl, &lower);
+            // 4. Assign arguments based on predicate-specific positional heuristics.
+            // An alias match is a weak signal: when the text also names constants
+            // this signature does not declare, the alias may well describe one of
+            // those instead. Prefer "unknown constant" over a guessed binding.
+            let allow_alias = absent_identifiers.is_empty();
+            let args = assign_arguments(pred_name, &matched_constants, nl, &lower, allow_alias);
 
-            // 5. Confidence scoring
-            let expected = pred_def.map(|p| p.arguments.len()).unwrap_or(0);
-            let confidence = if args.len() == expected && expected > 0 {
-                0.95
-            } else if !args.is_empty() {
+            // 5. Distinctness: a predicate that distinguishes its slots must not
+            // receive the same constant twice.
+            let repeated =
+                pred_def.is_some_and(distinguishes_slots) && has_repeated_constant(&args);
+
+            // 6. Structural confidence scoring
+            let exact = !args.is_empty() && args.iter().all(BoundArgument::is_exact);
+            let confidence = if args.is_empty() {
+                0.0
+            } else if repeated {
                 0.5
             } else {
-                0.0
+                match pred_def.map(|p| p.arguments.len()) {
+                    Some(expected) if args.len() == expected => {
+                        if exact {
+                            0.95
+                        } else {
+                            0.9
+                        }
+                    }
+                    None if !exact => 0.5,
+                    None => 0.8,
+                    Some(_) => 0.5,
+                }
             };
 
             if confidence > 0.0 {
                 candidates.push(GroundedAtom {
                     predicate: pred_name.to_string(),
                     arguments: args,
+                    exact,
                     confidence,
                 });
             }
@@ -89,16 +117,184 @@ impl Grounder for RuleGrounder {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let status = if candidates.iter().any(|c| c.confidence >= 0.8) {
-            GroundingStatus::Grounded
-        } else if !candidates.is_empty() {
-            GroundingStatus::Ambiguous
-        } else {
-            GroundingStatus::Ungroundable
-        };
+        let status = classify(sig, &candidates, &absent_identifiers);
 
-        GroundingResult { candidates, status }
+        GroundingResult {
+            candidates,
+            status,
+            absent_identifiers,
+        }
     }
+}
+
+/// Decide the overall status. Order matters: a contradiction is reported even
+/// when another candidate is grounded, and an explainable shortfall is
+/// `Incomplete` rather than the misleading `Ambiguous`.
+fn classify(
+    sig: &Signature,
+    candidates: &[GroundedAtom],
+    absent_identifiers: &[String],
+) -> GroundingStatus {
+    let is_contradictory = |c: &GroundedAtom| {
+        sig.predicates
+            .iter()
+            .find(|p| p.name == c.predicate)
+            .is_some_and(distinguishes_slots)
+            && has_repeated_constant(&c.arguments)
+    };
+
+    if candidates.is_empty() {
+        return if absent_identifiers.is_empty() {
+            GroundingStatus::Ungroundable
+        } else {
+            GroundingStatus::Incomplete
+        };
+    }
+    if candidates.iter().any(is_contradictory) {
+        return GroundingStatus::Contradictory;
+    }
+    if candidates.iter().any(|c| c.confidence >= 0.8) {
+        return GroundingStatus::Grounded;
+    }
+    // Short argument list against a declared predicate that needs more: the
+    // cause is a partially stated requirement, not an ambiguous one.
+    let short_of_declared = candidates.iter().any(|c| {
+        sig.predicates
+            .iter()
+            .find(|p| p.name == c.predicate)
+            .is_some_and(|p| p.arguments.len() >= 2 && c.arguments.len() < p.arguments.len())
+    });
+    if !absent_identifiers.is_empty() || short_of_declared {
+        GroundingStatus::Incomplete
+    } else {
+        GroundingStatus::Ambiguous
+    }
+}
+
+/// A predicate distinguishes its slots when it declares more than one slot and
+/// the slot names are pairwise distinct — the signature author's own statement
+/// that the slots mean different things.
+fn distinguishes_slots(pred: &PredicateDef) -> bool {
+    let names: Vec<&str> = pred.arguments.iter().map(|a| a.name.as_str()).collect();
+    if names.len() < 2 {
+        return false;
+    }
+    let mut seen = std::collections::HashSet::new();
+    names.iter().all(|n| seen.insert(*n))
+}
+
+fn has_repeated_constant(args: &[BoundArgument]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    args.iter().any(|a| !seen.insert(a.constant.as_str()))
+}
+
+// ── Absent identifiers ──
+
+/// Longest token we are willing to consider a constant-shaped identifier.
+const MAX_IDENTIFIER_LEN: usize = 12;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+    Alpha,
+    Digit,
+    Other,
+}
+
+fn class_of(c: char) -> CharClass {
+    if c.is_ascii_digit() {
+        CharClass::Digit
+    } else if c.is_alphabetic() {
+        CharClass::Alpha
+    } else {
+        CharClass::Other
+    }
+}
+
+/// Split a name into maximal runs of the same character class.
+/// `T1.1` → [Alpha, Digit, Other, Digit].
+fn name_shape(name: &str) -> Vec<CharClass> {
+    let mut shape = Vec::new();
+    for c in name.chars() {
+        let class = class_of(c);
+        if shape.last() != Some(&class) {
+            shape.push(class);
+        }
+    }
+    shape
+}
+
+/// Find tokens in the text that have the shape of a constant of a declared
+/// type but are not provided by any constant of that type.
+///
+/// The shape is inferred from the signature itself: each constant type
+/// contributes its longest constant name, and its run structure is the pattern
+/// to match. This keeps the grounder domain-agnostic — no task-ID syntax is
+/// hard-coded anywhere.
+fn extract_absent_identifiers(nl: &str, sig: &Signature) -> Vec<String> {
+    // Longest constant name per type; its shape is the type's identifier pattern.
+    let mut patterns: Vec<(Vec<CharClass>, usize)> = Vec::new();
+    for type_def in &sig.types {
+        let Some(longest) = sig
+            .constants
+            .iter()
+            .filter(|c| c.type_name == type_def.name)
+            .map(|c| c.name.as_str())
+            .max_by_key(|n| n.chars().count())
+        else {
+            continue;
+        };
+        let shape = name_shape(longest);
+        // A shape with a single run (e.g. all-alphabetic names) carries no
+        // structure to match on and would match ordinary words.
+        if shape.len() < 2 {
+            continue;
+        }
+        let max_len = longest.chars().count().min(MAX_IDENTIFIER_LEN);
+        patterns.push((shape, max_len));
+    }
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+
+    let known: std::collections::HashSet<&str> =
+        sig.constants.iter().map(|c| c.name.as_str()).collect();
+    let chars: Vec<char> = nl.chars().collect();
+    let mut absent: Vec<String> = Vec::new();
+
+    // For each start position, try every length and shape; record the longest
+    // match so that trailing punctuation is not appended to the identifier.
+    let mut i = 0;
+    while i < chars.len() {
+        let mut best: Option<usize> = None;
+        let limit = (chars.len() - i).min(MAX_IDENTIFIER_LEN);
+        for len in 2..=limit {
+            let candidate: String = chars[i..i + len].iter().collect();
+            let shape = name_shape(&candidate);
+            if fits_any(&shape, len, &patterns) {
+                best = Some(len);
+            }
+        }
+        match best {
+            Some(len) => {
+                let candidate: String = chars[i..i + len].iter().collect();
+                if !known.contains(candidate.as_str()) && !absent.contains(&candidate) {
+                    absent.push(candidate);
+                }
+                i += len;
+            }
+            None => i += 1,
+        }
+    }
+    absent
+}
+
+/// Does a candidate's shape match one of the type patterns?
+/// Identifiers start with a letter; this keeps us off numbers in prose.
+fn fits_any(shape: &[CharClass], len: usize, patterns: &[(Vec<CharClass>, usize)]) -> bool {
+    shape.first() == Some(&CharClass::Alpha)
+        && patterns
+            .iter()
+            .any(|(pattern, max_len)| len <= *max_len && shape == pattern.as_slice())
 }
 
 /// Check if a constant appears in the NL text (by name or alias).
@@ -108,7 +304,7 @@ fn appears_in(c: &ConstantDef, nl: &str, lower: &str) -> bool {
         return true;
     }
     // Alias match (e.g., "migration" from task description)
-    c.aliases.iter().any(|a| lower.contains(a))
+    c.aliases.iter().any(|a| lower.contains(a.as_str()))
 }
 
 /// Assign arguments to slots based on predicate-specific heuristics.
@@ -117,7 +313,16 @@ fn assign_arguments(
     matched: &[&ConstantDef],
     nl: &str,
     lower: &str,
-) -> Vec<String> {
+    allow_alias: bool,
+) -> Vec<BoundArgument> {
+    let find = |c: &ConstantDef, slice: &str| find_match(c, slice, allow_alias);
+    let take = |n: usize| -> Vec<BoundArgument> {
+        matched
+            .iter()
+            .take(n)
+            .map(|c| BoundArgument::by_name(&c.name))
+            .collect()
+    };
     match pred_name {
         "BEFORE" => {
             // "X BEFORE Y" → earlier=X, later=Y
@@ -125,18 +330,18 @@ fn assign_arguments(
             if let Some(pos) = lower.find("before") {
                 let before_text = &nl[..pos];
                 let after_text = &nl[pos + 6..];
-                let before_match = matched.iter().find(|c| appears_in_slice(c, before_text));
-                let after_match = matched.iter().find(|c| appears_in_slice(c, after_text));
+                let before_match = matched.iter().find_map(|c| find(c, before_text));
+                let after_match = matched.iter().find_map(|c| find(c, after_text));
                 let mut args = Vec::new();
-                if let Some(c) = before_match {
-                    args.push(c.name.clone());
+                if let Some(b) = before_match {
+                    args.push(b);
                 }
-                if let Some(c) = after_match {
-                    args.push(c.name.clone());
+                if let Some(a) = after_match {
+                    args.push(a);
                 }
                 args
             } else {
-                matched.iter().take(2).map(|c| c.name.clone()).collect()
+                take(2)
             }
         }
         "AFTER" => {
@@ -144,22 +349,22 @@ fn assign_arguments(
             if let Some(pos) = lower.find("after") {
                 let before_text = &nl[..pos];
                 let after_text = &nl[pos + 5..];
-                let before_match = matched.iter().find(|c| appears_in_slice(c, before_text));
-                let after_match = matched.iter().find(|c| appears_in_slice(c, after_text));
+                let before_match = matched.iter().find_map(|c| find(c, before_text));
+                let after_match = matched.iter().find_map(|c| find(c, after_text));
                 let mut args = Vec::new();
                 // AFTER: the thing before "after" is the later task
-                if let Some(c) = after_match {
-                    args.push(c.name.clone()); // earlier
+                if let Some(a) = after_match {
+                    args.push(a); // earlier
                 }
-                if let Some(c) = before_match {
-                    args.push(c.name.clone()); // later
+                if let Some(b) = before_match {
+                    args.push(b); // later
                 }
                 args
             } else {
-                matched.iter().take(2).map(|c| c.name.clone()).collect()
+                take(2)
             }
         }
-        "CONCURRENTLY" | "AT_MOST_ONE" => matched.iter().take(2).map(|c| c.name.clone()).collect(),
+        "CONCURRENTLY" | "AT_MOST_ONE" => take(2),
         "IF_THEN" => {
             // "IF X fails THEN Y" → trigger=X, consequent=Y
             if let Some(if_pos) = lower.find("if") {
@@ -171,282 +376,45 @@ fn assign_arguments(
                 } else {
                     ""
                 };
-                let trigger = matched.iter().find(|c| appears_in_slice(c, trigger_text));
-                let consequent = matched
-                    .iter()
-                    .find(|c| appears_in_slice(c, consequent_text));
+                let trigger = matched.iter().find_map(|c| find(c, trigger_text));
+                let consequent = matched.iter().find_map(|c| find(c, consequent_text));
                 let mut args = Vec::new();
-                if let Some(c) = trigger {
-                    args.push(c.name.clone());
+                if let Some(t) = trigger {
+                    args.push(t);
                 }
                 if let Some(c) = consequent {
-                    args.push(c.name.clone());
+                    args.push(c);
                 }
                 args
             } else {
-                matched.iter().take(2).map(|c| c.name.clone()).collect()
+                take(2)
             }
         }
-        "ALWAYS" => matched.iter().take(1).map(|c| c.name.clone()).collect(),
-        _ => matched.iter().map(|c| c.name.clone()).collect(),
+        "ALWAYS" => take(1),
+        _ => matched
+            .iter()
+            .map(|c| BoundArgument::by_name(&c.name))
+            .collect(),
     }
 }
 
-/// Check if a constant appears in a slice of the NL text.
-fn appears_in_slice(c: &ConstantDef, slice: &str) -> bool {
+/// Find how a constant occurs in a slice: by name when possible, else by alias.
+/// Alias matching is skipped when `allow_alias` is false.
+fn find_match(c: &ConstantDef, slice: &str, allow_alias: bool) -> Option<BoundArgument> {
+    if slice.contains(&c.name) {
+        return Some(BoundArgument::by_name(&c.name));
+    }
+    if !allow_alias {
+        return None;
+    }
     let lower = slice.to_lowercase();
-    slice.contains(&c.name) || c.aliases.iter().any(|a| lower.contains(a))
+    c.aliases
+        .iter()
+        .find(|a| lower.contains(a.as_str()))
+        .map(|a| BoundArgument::by_alias(&c.name, a))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{ArgSlot, ConstantDef, PredicateDef, Signature, TypeDef};
-
-    fn test_sig() -> Signature {
-        Signature {
-            types: vec![TypeDef {
-                name: "task_id".into(),
-            }],
-            predicates: vec![
-                PredicateDef {
-                    name: "BEFORE".into(),
-                    arguments: vec![
-                        ArgSlot {
-                            name: "earlier".into(),
-                            type_name: "task_id".into(),
-                        },
-                        ArgSlot {
-                            name: "later".into(),
-                            type_name: "task_id".into(),
-                        },
-                    ],
-                },
-                PredicateDef {
-                    name: "AFTER".into(),
-                    arguments: vec![
-                        ArgSlot {
-                            name: "earlier".into(),
-                            type_name: "task_id".into(),
-                        },
-                        ArgSlot {
-                            name: "later".into(),
-                            type_name: "task_id".into(),
-                        },
-                    ],
-                },
-                PredicateDef {
-                    name: "CONCURRENTLY".into(),
-                    arguments: vec![
-                        ArgSlot {
-                            name: "a".into(),
-                            type_name: "task_id".into(),
-                        },
-                        ArgSlot {
-                            name: "b".into(),
-                            type_name: "task_id".into(),
-                        },
-                    ],
-                },
-                PredicateDef {
-                    name: "IF_THEN".into(),
-                    arguments: vec![
-                        ArgSlot {
-                            name: "trigger".into(),
-                            type_name: "task_id".into(),
-                        },
-                        ArgSlot {
-                            name: "consequent".into(),
-                            type_name: "task_id".into(),
-                        },
-                    ],
-                },
-                PredicateDef {
-                    name: "ALWAYS".into(),
-                    arguments: vec![ArgSlot {
-                        name: "target".into(),
-                        type_name: "task_id".into(),
-                    }],
-                },
-                PredicateDef {
-                    name: "AT_MOST_ONE".into(),
-                    arguments: vec![
-                        ArgSlot {
-                            name: "a".into(),
-                            type_name: "task_id".into(),
-                        },
-                        ArgSlot {
-                            name: "b".into(),
-                            type_name: "task_id".into(),
-                        },
-                    ],
-                },
-            ],
-            constants: vec![
-                ConstantDef {
-                    name: "T1.1".into(),
-                    type_name: "task_id".into(),
-                    aliases: vec!["setup".into(), "create project".into(), "1.1".into()],
-                },
-                ConstantDef {
-                    name: "T1.2".into(),
-                    type_name: "task_id".into(),
-                    aliases: vec!["deps".into(), "add dependencies".into(), "1.2".into()],
-                },
-                ConstantDef {
-                    name: "T2.1".into(),
-                    type_name: "task_id".into(),
-                    aliases: vec!["migrate".into(), "migration".into(), "2.1".into()],
-                },
-                ConstantDef {
-                    name: "T2.2".into(),
-                    type_name: "task_id".into(),
-                    aliases: vec!["test".into(), "testing".into(), "2.2".into()],
-                },
-                ConstantDef {
-                    name: "T3.1".into(),
-                    type_name: "task_id".into(),
-                    aliases: vec!["deploy".into(), "deployment".into(), "3.1".into()],
-                },
-            ],
-        }
-    }
-
-    #[test]
-    fn test_ground_before_explicit_ids() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        let result = grounder.ground("T1.1 SHALL complete BEFORE T1.2 SHALL run", &sig);
-        assert_eq!(result.status, GroundingStatus::Grounded);
-        assert_eq!(result.candidates[0].predicate, "BEFORE");
-        assert_eq!(result.candidates[0].arguments, vec!["T1.1", "T1.2"]);
-        assert!(result.candidates[0].confidence >= 0.8);
-    }
-
-    #[test]
-    fn test_ground_before_with_aliases() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        let result = grounder.ground("The migration must finish before testing starts", &sig);
-        // Both args found via aliases (migration→T2.1, testing→T2.2) → Grounded
-        assert_eq!(result.status, GroundingStatus::Grounded);
-        assert_eq!(result.candidates[0].predicate, "BEFORE");
-        assert!(result.candidates[0].arguments.contains(&"T2.1".to_string()));
-        assert!(result.candidates[0].arguments.contains(&"T2.2".to_string()));
-    }
-
-    #[test]
-    fn test_ground_after_explicit_ids() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        let result = grounder.ground("T2.2 SHALL run AFTER T2.1 SHALL complete", &sig);
-        assert_eq!(result.status, GroundingStatus::Grounded);
-        assert_eq!(result.candidates[0].predicate, "AFTER");
-        // AFTER: earlier is the task after "after", later is the task before "after"
-        assert_eq!(result.candidates[0].arguments, vec!["T2.1", "T2.2"]);
-    }
-
-    #[test]
-    fn test_ground_concurrently() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        let result = grounder.ground("T2.1 and T2.2 SHALL run concurrently", &sig);
-        assert_eq!(result.status, GroundingStatus::Grounded);
-        assert_eq!(result.candidates[0].predicate, "CONCURRENTLY");
-        assert!(result.candidates[0].arguments.contains(&"T2.1".to_string()));
-        assert!(result.candidates[0].arguments.contains(&"T2.2".to_string()));
-    }
-
-    #[test]
-    fn test_ground_if_then() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        let result = grounder.ground("IF T1.1 fails THEN T3.1 SHALL run", &sig);
-        assert_eq!(result.status, GroundingStatus::Grounded);
-        assert_eq!(result.candidates[0].predicate, "IF_THEN");
-        assert_eq!(result.candidates[0].arguments, vec!["T1.1", "T3.1"]);
-    }
-
-    #[test]
-    fn test_ground_always() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        let result = grounder.ground("T3.1 SHALL ALWAYS be available", &sig);
-        assert_eq!(result.status, GroundingStatus::Grounded);
-        assert_eq!(result.candidates[0].predicate, "ALWAYS");
-        assert_eq!(result.candidates[0].arguments, vec!["T3.1"]);
-    }
-
-    #[test]
-    fn test_ground_at_most_one() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        let result = grounder.ground("At most one of T2.1, T2.2 SHALL be active", &sig);
-        assert_eq!(result.status, GroundingStatus::Grounded);
-        assert_eq!(result.candidates[0].predicate, "AT_MOST_ONE");
-        assert!(result.candidates[0].arguments.contains(&"T2.1".to_string()));
-        assert!(result.candidates[0].arguments.contains(&"T2.2".to_string()));
-    }
-
-    #[test]
-    fn test_ground_ungroundable() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        let result = grounder.ground("The system SHALL be user-friendly", &sig);
-        assert_eq!(result.status, GroundingStatus::Ungroundable);
-        assert!(result.candidates.is_empty());
-    }
-
-    #[test]
-    fn test_ground_no_keyword() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        let result = grounder.ground("T1.1 does something", &sig);
-        assert_eq!(result.status, GroundingStatus::Ungroundable);
-    }
-
-    #[test]
-    fn test_ground_batch() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        let inputs = vec!["T1.1 BEFORE T1.2", "The system SHALL be user-friendly"];
-        let results = grounder.ground_batch(&inputs, &sig);
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].status, GroundingStatus::Grounded);
-        assert_eq!(results[1].status, GroundingStatus::Ungroundable);
-    }
-
-    #[test]
-    fn test_ground_after_with_aliases() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        let result = grounder.ground("Testing SHALL start after migration completes", &sig);
-        // Both args found via aliases → Grounded
-        assert_eq!(result.status, GroundingStatus::Grounded);
-        assert_eq!(result.candidates[0].predicate, "AFTER");
-    }
-
-    #[test]
-    fn test_ground_if_then_with_aliases() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        let result = grounder.ground("If setup fails then deployment SHALL run", &sig);
-        // Both args found via aliases → Grounded
-        assert_eq!(result.status, GroundingStatus::Grounded);
-        assert_eq!(result.candidates[0].predicate, "IF_THEN");
-    }
-
-    #[test]
-    fn test_ground_multiple_predicates() {
-        let sig = test_sig();
-        let grounder = RuleGrounder;
-        // Text contains both BEFORE and ALWAYS keywords
-        let result = grounder.ground(
-            "T1.1 SHALL complete BEFORE T1.2. T3.1 SHALL ALWAYS be available.",
-            &sig,
-        );
-        // Should find both predicates
-        assert!(result.candidates.iter().any(|c| c.predicate == "BEFORE"));
-        assert!(result.candidates.iter().any(|c| c.predicate == "ALWAYS"));
-    }
-}
+mod diagnostics_tests;
+#[cfg(test)]
+mod tests;

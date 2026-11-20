@@ -53,13 +53,14 @@ pub fn signature_from_tasks(source: &str, _path: &Path) -> anyhow::Result<Signat
                 || helpers::find_child(node, "task_list_marker_checked").is_some();
             if checked
                 && let Some(content) = helpers::find_child(node, "paragraph")
-                    && let Ok(text) = helpers::node_text(&content, bytes) {
-                        let text = text.trim();
-                        let (id, desc) = extract_task_id(text);
-                        if !id.is_empty() {
-                            tasks.push((id, desc.to_string(), current_phase.clone()));
-                        }
-                    }
+                && let Ok(text) = helpers::node_text(&content, bytes)
+            {
+                let text = text.trim();
+                let (id, desc) = extract_task_id(text);
+                if !id.is_empty() {
+                    tasks.push((id, desc.to_string(), current_phase.clone()));
+                }
+            }
         }
         _ => {}
     });
@@ -266,9 +267,10 @@ fn extract_task_id(text: &str) -> (String, String) {
             end += 1;
         }
         if end > start
-            && let Ok(s) = std::str::from_utf8(&bytes[start..end]) {
-                return (s.to_string(), text[start..end].to_string());
-            }
+            && let Ok(s) = std::str::from_utf8(&bytes[start..end])
+        {
+            return (s.to_string(), text[start..end].to_string());
+        }
         i = end;
     }
 
@@ -302,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_extract_task_id_multi_dot() {
-        let (id, desc) = extract_task_id("T10.7 test visualize");
+        let (id, _desc) = extract_task_id("T10.7 test visualize");
         assert_eq!(id, "10.7");
     }
 
@@ -315,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_extract_task_id_parenthetical_multi() {
-        let (id, desc) = extract_task_id("setup (T1.1) before migration (T2.1)");
+        let (id, _desc) = extract_task_id("setup (T1.1) before migration (T2.1)");
         assert_eq!(id, "1.1");
     }
 
@@ -425,5 +427,3 @@ mod tests {
         assert_eq!(sig.constants[2].name, "T1.3");
     }
 }
-
-

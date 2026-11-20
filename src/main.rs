@@ -11,20 +11,30 @@
 //!
 //!   groundcontrol signature <change-name>    # just emit the signature JSON
 
+mod directives;
 mod grounders;
+mod init;
 mod parse;
+mod specs;
 mod types;
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::specs::parse_specs;
 use clap::{Parser, Subcommand};
-use types::{
-    CheckOutput, CheckSummary, CloseMatch, Directive, GroundedInput, Grounder, GroundingStatus,
-};
+use init::run_init;
+use types::{CheckOutput, CheckSummary, GroundedInput, Grounder, GroundingStatus};
+
+struct Statement {
+    source: String,
+    text: String,
+}
 
 #[derive(Parser)]
-#[command(name = "groundcontrol", about = "Ground NL into system signatures for temporal logic")]
+#[command(
+    name = "groundcontrol",
+    about = "Ground NL into system signatures for temporal logic"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -63,7 +73,11 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Check { change, format, stdin } => run_check(change, &format, stdin)?,
+        Commands::Check {
+            change,
+            format,
+            stdin,
+        } => run_check(change, &format, stdin)?,
         Commands::Signature { change, stdin } => run_signature(change, stdin)?,
         Commands::Init { project_root } => run_init(project_root)?,
     }
@@ -90,7 +104,10 @@ fn run_check(change: Option<String>, format: &str, stdin: bool) -> anyhow::Resul
 
     // Merge outputs
     let merged = merge_outputs(&all_outputs);
-    let has_issues = merged.summary.ungroundable > 0 || merged.summary.ambiguous > 0;
+    let has_issues = merged.summary.ungroundable > 0
+        || merged.summary.ambiguous > 0
+        || merged.summary.incomplete > 0
+        || merged.summary.contradictory > 0;
 
     if has_issues {
         match format {
@@ -116,7 +133,7 @@ fn check_single(change_dir: &std::path::Path, change_name: &str) -> anyhow::Resu
     let mut inputs = Vec::new();
     for stmt in &statements {
         let result = grounder.ground(&stmt.text, &sig);
-        let directives = generate_directives(&result, stmt, &sig);
+        let directives = directives::generate_directives(&result, stmt, &sig);
         inputs.push(GroundedInput {
             source: stmt.source.clone(),
             text: stmt.text.clone(),
@@ -128,9 +145,26 @@ fn check_single(change_dir: &std::path::Path, change_name: &str) -> anyhow::Resu
 
     let summary = CheckSummary {
         total: inputs.len(),
-        grounded: inputs.iter().filter(|i| i.status == GroundingStatus::Grounded).count(),
-        ambiguous: inputs.iter().filter(|i| i.status == GroundingStatus::Ambiguous).count(),
-        ungroundable: inputs.iter().filter(|i| i.status == GroundingStatus::Ungroundable).count(),
+        grounded: inputs
+            .iter()
+            .filter(|i| i.status == GroundingStatus::Grounded)
+            .count(),
+        ambiguous: inputs
+            .iter()
+            .filter(|i| i.status == GroundingStatus::Ambiguous)
+            .count(),
+        ungroundable: inputs
+            .iter()
+            .filter(|i| i.status == GroundingStatus::Ungroundable)
+            .count(),
+        incomplete: inputs
+            .iter()
+            .filter(|i| i.status == GroundingStatus::Incomplete)
+            .count(),
+        contradictory: inputs
+            .iter()
+            .filter(|i| i.status == GroundingStatus::Contradictory)
+            .count(),
     };
 
     Ok(CheckOutput {
@@ -145,9 +179,20 @@ fn merge_outputs(outputs: &[CheckOutput]) -> CheckOutput {
     if outputs.is_empty() {
         return CheckOutput {
             plan_name: String::new(),
-            signature: types::SignatureSummary { tasks: 0, predicates: 0, types: 0 },
+            signature: types::SignatureSummary {
+                tasks: 0,
+                predicates: 0,
+                types: 0,
+            },
             inputs: vec![],
-            summary: CheckSummary { total: 0, grounded: 0, ambiguous: 0, ungroundable: 0 },
+            summary: CheckSummary {
+                total: 0,
+                grounded: 0,
+                ambiguous: 0,
+                ungroundable: 0,
+                incomplete: 0,
+                contradictory: 0,
+            },
         };
     }
     if outputs.len() == 1 {
@@ -160,6 +205,8 @@ fn merge_outputs(outputs: &[CheckOutput]) -> CheckOutput {
     let mut grounded = 0;
     let mut ambiguous = 0;
     let mut ungroundable = 0;
+    let mut incomplete = 0;
+    let mut contradictory = 0;
 
     for o in outputs {
         for input in &o.inputs {
@@ -171,13 +218,26 @@ fn merge_outputs(outputs: &[CheckOutput]) -> CheckOutput {
         grounded += o.summary.grounded;
         ambiguous += o.summary.ambiguous;
         ungroundable += o.summary.ungroundable;
+        incomplete += o.summary.incomplete;
+        contradictory += o.summary.contradictory;
     }
 
     CheckOutput {
         plan_name: names.join(", "),
-        signature: types::SignatureSummary { tasks: 0, predicates: 0, types: 0 },
+        signature: types::SignatureSummary {
+            tasks: 0,
+            predicates: 0,
+            types: 0,
+        },
         inputs: all_inputs,
-        summary: CheckSummary { total, grounded, ambiguous, ungroundable },
+        summary: CheckSummary {
+            total,
+            grounded,
+            ambiguous,
+            ungroundable,
+            incomplete,
+            contradictory,
+        },
     }
 }
 
@@ -266,313 +326,10 @@ fn resolve_changes(
                 changes.sort_by(|a, b| a.1.cmp(&b.1));
                 return Ok(changes); // empty vec is valid — caller handles it
             }
-            Ok(vec![])// no openspec/changes/ — empty is valid
+            Ok(vec![]) // no openspec/changes/ — empty is valid
         }
     }
 }
-
-// ── Spec parsing ──
-
-struct Statement {
-    source: String,
-    text: String,
-}
-
-fn parse_specs(specs_dir: &Path) -> anyhow::Result<Vec<Statement>> {
-    let mut statements = Vec::new();
-
-    if !specs_dir.exists() {
-        return Ok(statements);
-    }
-
-    collect_spec_files(specs_dir, specs_dir, &mut statements)?;
-    Ok(statements)
-}
-
-fn collect_spec_files(
-    base: &Path,
-    dir: &Path,
-    out: &mut Vec<Statement>,
-) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_spec_files(base, &path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md")
-            && path.file_stem().and_then(|s| s.to_str()) == Some("spec")
-        {
-            let source = std::fs::read_to_string(&path)?;
-            let rel = path
-                .strip_prefix(base)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
-            extract_requirements(&source, &rel, out);
-        }
-    }
-    Ok(())
-}
-
-/// Simple line-based extraction of requirement SHALL statements from spec.md.
-/// This is a lightweight alternative to full tree-sitter parsing of specs.
-fn extract_requirements(source: &str, rel_path: &str, out: &mut Vec<Statement>) {
-    let lines: Vec<&str> = source.lines().collect();
-    let mut i = 0;
-    let mut in_requirement = false;
-    let mut req_line = 0;
-
-    while i < lines.len() {
-        let line = lines[i].trim();
-
-        if line.starts_with("### Requirement:") || line.starts_with("### requirement:") {
-            in_requirement = true;
-            req_line = i + 1; // 1-indexed
-            i += 1;
-            continue;
-        }
-
-        if in_requirement {
-            // Collect body paragraphs until next heading
-            let mut body = String::new();
-            while i < lines.len() {
-                let bl = lines[i].trim();
-                if bl.starts_with("###") || bl.starts_with("####") {
-                    break;
-                }
-                if !bl.is_empty() {
-                    if !body.is_empty() {
-                        body.push(' ');
-                    }
-                    body.push_str(bl);
-                }
-                i += 1;
-            }
-
-            // Extract SHALL statement from body
-            let statement = extract_shall(&body);
-            if !statement.is_empty() {
-                out.push(Statement {
-                    source: format!("{}#L{}", rel_path, req_line),
-                    text: statement,
-                });
-            }
-            in_requirement = false;
-            continue;
-        }
-
-        i += 1;
-    }
-}
-
-/// Extract the first sentence containing SHALL/MUST from body text.
-/// Avoids splitting on periods within task IDs (e.g., "T3.1").
-fn extract_shall(body: &str) -> String {
-    // Split on sentence boundaries: ". " (period+space), "! ", "? ", or end of string.
-    // Skip periods that are part of task IDs like "T2.1 " (digit.space → not a sentence end).
-    let sentences: Vec<&str> = body
-        .split(['!', '?'])
-        .flat_map(|part| {
-            let mut result = Vec::new();
-            let mut start = 0;
-            let bytes = part.as_bytes();
-            let len = part.len();
-            let mut i = 0;
-            while i < len.saturating_sub(1) {
-                if bytes[i] == b'.' && bytes[i + 1] == b' ' {
-                    // Check if this period is part of a task ID (digit before, digit after space)
-                    let is_task_id = i > 0
-                        && bytes[i - 1].is_ascii_digit()
-                        && i + 2 < len
-                        && bytes[i + 2].is_ascii_digit();
-                    if !is_task_id {
-                        result.push(&part[start..i]);
-                        start = i + 2;
-                    }
-                    i += 1;
-                } else {
-                    i += 1;
-                }
-            }
-            result.push(&part[start..]);
-            result
-        })
-        .collect();
-    for s in &sentences {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let upper = trimmed.to_uppercase();
-        if upper.contains("SHALL") || upper.contains("MUST") {
-            return trimmed.to_string();
-        }
-    }
-    // Fallback: return the first non-empty line
-    body.lines().next().unwrap_or("").trim().to_string()
-}
-
-// ── Directive generation ──
-
-fn generate_directives(
-    result: &types::GroundingResult,
-    stmt: &Statement,
-    sig: &types::Signature,
-) -> Vec<Directive> {
-    match result.status {
-        GroundingStatus::Grounded => vec![],
-
-        GroundingStatus::Ambiguous => {
-            let best = &result.candidates[0];
-            let mut dirs = Vec::new();
-
-            // Check for BEFORE with only one argument — common mistake
-            if best.predicate == "BEFORE" && best.arguments.len() < 2 {
-                dirs.push(Directive {
-                    severity: "warning".to_string(),
-                    element: stmt.source.clone(),
-                    detail: format!(
-                        "BEFORE requires two task IDs, but only '{}' was found.",
-                        best.arguments.first().map(|s| s.as_str()).unwrap_or("?"),
-                    ),
-                    suggested_action: "Add a second task ID after 'BEFORE'. Example: 'T2.1 SHALL complete BEFORE T3.1 SHALL run'.".to_string(),
-                    close_matches: None,
-                });
-            }
-
-            // Find which arguments were matched via alias vs exact name
-            for (i, arg) in best.arguments.iter().enumerate() {
-                if !stmt.text.contains(arg)
-                    && let Some(constant) = sig.constants.iter().find(|c| c.name == *arg) {
-                        let alias = constant.aliases.first().cloned().unwrap_or_default();
-                        dirs.push(Directive {
-                            severity: "warning".to_string(),
-                            element: stmt.source.clone(),
-                            detail: format!(
-                                "Argument {} matched '{}' via alias '{}' (confidence: {:.2}). \
-                                 Add explicit '{}' to raise confidence.",
-                                i + 1,
-                                arg,
-                                alias,
-                                best.confidence,
-                                arg,
-                            ),
-                            suggested_action: format!(
-                                "Replace the NL reference with '{}' or add '({})' after it.",
-                                arg, arg,
-                            ),
-                            close_matches: None,
-                        });
-                    }
-            }
-
-            if dirs.is_empty() {
-                dirs.push(Directive {
-                    severity: "warning".to_string(),
-                    element: stmt.source.clone(),
-                    detail: format!(
-                        "Grounded with low confidence ({:.2}). Consider using explicit task IDs.",
-                        best.confidence,
-                    ),
-                    suggested_action: "Add explicit task ID references (e.g., 'T2.1') to the requirement statement.".to_string(),
-                    close_matches: None,
-                });
-            }
-
-            dirs
-        }
-
-        GroundingStatus::Ungroundable => {
-            let close_matches = find_close_matches(&stmt.text, sig);
-            let suggestions: Vec<String> = close_matches
-                .iter()
-                .map(|m| format!("'{}' (alias: '{}')", m.constant, m.alias))
-                .collect();
-
-            let suggested = if suggestions.is_empty() {
-                "Add a task ID reference (e.g., 'T5.1') or a known predicate keyword (BEFORE, AFTER, CONCURRENTLY, IF...THEN, ALWAYS, AT MOST ONE).".to_string()
-            } else {
-                format!(
-                    "Close matches: {}. Use one of these task IDs explicitly in the requirement.",
-                    suggestions.join(", ")
-                )
-            };
-
-            vec![Directive {
-                severity: "blocker".to_string(),
-                element: stmt.source.clone(),
-                detail: format!(
-                    "Could not ground: '{}'. No matching task or predicate found.",
-                    stmt.text,
-                ),
-                suggested_action: suggested,
-                close_matches: Some(close_matches),
-            }]
-        }
-    }
-}
-
-/// Find close matches for ungroundable text by comparing against constant names and aliases.
-fn find_close_matches(text: &str, sig: &types::Signature) -> Vec<CloseMatch> {
-    let lower = text.to_lowercase();
-    let mut matches: Vec<CloseMatch> = sig
-        .constants
-        .iter()
-        .filter_map(|c| {
-            // Compare against the constant name itself (e.g., "T1.3")
-            let name_score = strsim(&lower, &c.name.to_lowercase());
-            // Compare against all aliases
-            let best_alias = c
-                .aliases
-                .iter()
-                .map(|a| (a, strsim(&lower, a)))
-                .max_by(|(_, s1), (_, s2)| s1.partial_cmp(s2).unwrap_or(std::cmp::Ordering::Equal));
-
-            let (best_alias_str, best_alias_score) = match best_alias {
-                Some((a, s)) if s > name_score => (a.clone(), s),
-                _ => (c.name.clone(), name_score),
-            };
-
-            if best_alias_score > 0.4 {
-                Some(CloseMatch {
-                    constant: c.name.clone(),
-                    alias: best_alias_str,
-                    similarity: best_alias_score,
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
-    matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
-    matches.truncate(5);
-    matches
-}
-
-/// Simple string similarity (Dice coefficient on bigrams).
-fn strsim(a: &str, b: &str) -> f64 {
-    let a_bigrams: Vec<Vec<char>> = a
-        .as_bytes()
-        .windows(2)
-        .map(|w| w.iter().map(|&c| c as char).collect())
-        .collect();
-    let b_bigrams: Vec<Vec<char>> = b
-        .as_bytes()
-        .windows(2)
-        .map(|w| w.iter().map(|&c| c as char).collect())
-        .collect();
-
-    if a_bigrams.is_empty() || b_bigrams.is_empty() {
-        return 0.0;
-    }
-
-    let intersection = a_bigrams
-        .iter()
-        .filter(|bg| b_bigrams.contains(bg))
-        .count();
-    (2.0 * intersection as f64) / (a_bigrams.len() + b_bigrams.len()) as f64
-}
-
 // ── Human-readable output ──
 // Grouped: successes first (quiet), then errors (loud).
 
@@ -585,49 +342,56 @@ fn print_human(output: &CheckOutput) {
         if let Some(g) = input.groundings.first() {
             println!(
                 "\u{2713} {} \u{2192} {}({})",
-                input.source, g.predicate, g.arguments.join(", ")
+                input.source,
+                g.predicate,
+                g.names().join(", ")
             );
         }
     }
 
     // Pass 2: errors — loud with full details
     for input in &output.inputs {
-        match input.status {
-            GroundingStatus::Grounded => {}
-            GroundingStatus::Ambiguous => {
-                println!("\u{26A0} {}", input.source);
-                println!("   \"{}\"", input.text);
-                if let Some(g) = input.groundings.first() {
-                    println!(
-                        "   \u{2192} {}({}) @ {:.2}",
-                        g.predicate,
-                        g.arguments.join(", "),
-                        g.confidence
-                    );
-                }
-                for d in &input.directives {
-                    println!("   Suggestion: {}", d.suggested_action);
-                }
+        if input.status == GroundingStatus::Grounded {
+            continue;
+        }
+        let marker = match input.status {
+            GroundingStatus::Ungroundable | GroundingStatus::Contradictory => "\u{2717}",
+            _ => "\u{26A0}",
+        };
+        println!("{} {} [{}]", marker, input.source, input.status.as_str());
+        println!("   \"{}\"", input.text);
+        if let Some(g) = input.groundings.first() {
+            let args: Vec<String> = g
+                .arguments
+                .iter()
+                .map(|a| match &a.matched {
+                    types::MatchKind::Name => a.constant.clone(),
+                    types::MatchKind::Alias(alias) => format!("{} (alias '{}')", a.constant, alias),
+                })
+                .collect();
+            println!(
+                "   \u{2192} {}({}) @ {:.2}{}",
+                g.predicate,
+                args.join(", "),
+                g.confidence,
+                if g.exact { "" } else { " (not exact)" }
+            );
+        }
+        for d in &input.directives {
+            println!("   {}", d.detail);
+            if let Some(matches) = &d.close_matches
+                && !matches.is_empty()
+            {
+                println!(
+                    "   Close matches: {}",
+                    matches
+                        .iter()
+                        .map(|m| format!("'{}' (alias: '{}')", m.constant, m.alias))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
-            GroundingStatus::Ungroundable => {
-                println!("\u{2717} {}", input.source);
-                println!("   \"{}\"", input.text);
-                for d in &input.directives {
-                    println!("   {}", d.detail);
-                    if let Some(matches) = &d.close_matches
-                        && !matches.is_empty() {
-                            println!(
-                                "   Close matches: {}",
-                                matches
-                                    .iter()
-                                    .map(|m| format!("'{}' (alias: '{}')", m.constant, m.alias))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            );
-                        }
-                    println!("   Suggestion: {}", d.suggested_action);
-                }
-            }
+            println!("   Suggestion: {}", d.suggested_action);
         }
     }
 
@@ -635,186 +399,19 @@ fn print_human(output: &CheckOutput) {
     let has_issues = output.summary.ungroundable > 0 || output.summary.ambiguous > 0;
     if has_issues {
         println!(
-            "Summary: {} total | {} grounded | {} ambiguous | {} ungroundable",
+            "Summary: {} total | {} grounded | {} incomplete | {} ambiguous | {} contradictory | {} ungroundable",
             output.summary.total,
             output.summary.grounded,
+            output.summary.incomplete,
             output.summary.ambiguous,
+            output.summary.contradictory,
             output.summary.ungroundable
         );
     }
 }
-
-// ── Init command ──
-
-const GROUNDCONTROL_CONTEXT: &str = "\
-Every task reference in a spec MUST map to a real task ID.\n\
-Use explicit N.M IDs (e.g. 'T2.1') — not descriptions like 'the migration step'.\n\
-Task descriptions in tasks.md become aliases for fuzzy matching, so write\n\
-descriptive descriptions that capture the task's purpose.";
-
-fn groundcontrol_rules() -> BTreeMap<String, Vec<String>> {
-    let mut rules = BTreeMap::new();
-    rules.insert(
-        "specs".to_string(),
-        vec![
-            "Reference tasks by explicit ID: 'T2.1' not 'the migration step'".to_string(),
-            "Use parenthetical syntax for task IDs: 'the migration step (T2.1)'".to_string(),
-            "BEFORE requires two task IDs: 'T2.1 SHALL complete BEFORE T3.1 SHALL run'".to_string(),
-            "ALWAYS requires one task ID: 'ALWAYS T2.1 SHALL validate input'".to_string(),
-        ],
-    );
-    rules.insert(
-        "tasks".to_string(),
-        vec![
-            "Write descriptive task descriptions — they become aliases for grounding"
-                .to_string(),
-        ],
-    );
-    rules
-}
-
-fn run_init(project_root: Option<String>) -> anyhow::Result<()> {
-    let root = match project_root {
-        Some(p) => std::path::PathBuf::from(p),
-        None => std::env::current_dir()?,
-    };
-    let config_path = root.join("openspec").join("config.yaml");
-    merge_config(&config_path)?;
-    println!("✓ groundcontrol init: {}", config_path.display());
-    Ok(())
-}
-
-/// Merge groundcontrol's context and rules into openspec/config.yaml using YAML-aware merge.
-/// If the file does not exist, creates it with schema + groundcontrol content.
-fn merge_config(path: &std::path::Path) -> anyhow::Result<()> {
-    if !path.exists() {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let config = create_fresh_config();
-        std::fs::write(path, config)?;
-        return Ok(());
-    }
-
-    let content = std::fs::read_to_string(path)?;
-    let existing: serde_yaml::Value = serde_yaml::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
-
-    let merged = yaml_merge(&existing, GROUNDCONTROL_CONTEXT, &groundcontrol_rules());
-    let output = serde_yaml::to_string(&merged)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
-
-    let output = format!("# groundcontrol init\n{}", output);
-    std::fs::write(path, output)?;
-    Ok(())
-}
-
-/// Create a fresh config with schema + groundcontrol context and rules.
-fn create_fresh_config() -> String {
-    let mut config = serde_yaml::Mapping::new();
-    config.insert(
-        serde_yaml::Value::String("schema".to_string()),
-        serde_yaml::Value::String("spec-driven".to_string()),
-    );
-    let merged = yaml_merge(
-        &serde_yaml::Value::Mapping(config),
-        GROUNDCONTROL_CONTEXT,
-        &groundcontrol_rules(),
-    );
-    let output = serde_yaml::to_string(&merged).unwrap();
-    format!("# groundcontrol init\n{}", output)
-}
-
-/// Merge new context and rules into an existing YAML value.
-/// Context is appended with a blank line separator.
-/// Rules are merged per artifact type, deduplicating by exact string match.
-fn yaml_merge(
-    existing: &serde_yaml::Value,
-    new_context: &str,
-    new_rules: &BTreeMap<String, Vec<String>>,
-) -> serde_yaml::Value {
-    let mut merged = existing.clone();
-
-    // Merge context: append with blank line separator, skip if already present
-    match merged.get_mut("context") {
-        Some(serde_yaml::Value::String(ctx)) => {
-            let trimmed_new = new_context.trim();
-            if !ctx.contains(trimmed_new) {
-                let combined = format!("{}\n\n{}", ctx.trim(), trimmed_new);
-                *ctx = combined;
-            }
-        }
-        _ => {
-            merged["context"] = serde_yaml::Value::String(new_context.to_string());
-        }
-    }
-
-    // Merge rules: add new items per artifact type, deduplicating
-    let mut rules = match merged.get("rules") {
-        Some(serde_yaml::Value::Mapping(m)) => m.clone(),
-        _ => serde_yaml::Mapping::new(),
-    };
-
-    for (artifact_type, new_items) in new_rules {
-        let key = serde_yaml::Value::String(artifact_type.clone());
-        let existing_items = match rules.get(&key) {
-            Some(serde_yaml::Value::Sequence(s)) => s.clone(),
-            _ => serde_yaml::Sequence::new(),
-        };
-
-        let mut merged_items = existing_items.clone();
-        for item in new_items {
-            let item_val = serde_yaml::Value::String(item.clone());
-            if !merged_items.contains(&item_val) {
-                merged_items.push(item_val);
-            }
-        }
-
-        rules.insert(key, serde_yaml::Value::Sequence(merged_items));
-    }
-
-    merged["rules"] = serde_yaml::Value::Mapping(rules);
-    merged
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::types::{
-        ConstantDef, GroundedAtom, GroundingResult,
-        GroundingStatus, Signature, TypeDef,
-    };
-
-    #[test]
-    fn test_strsim_identical() {
-        let s = strsim("hello", "hello");
-        assert!((s - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_strsim_similar() {
-        let s = strsim("migration", "migrate");
-        assert!(s > 0.4);
-    }
-
-    #[test]
-    fn test_strsim_different() {
-        let s = strsim("abc", "xyz");
-        assert!(s < 0.1);
-    }
-
-    #[test]
-    fn test_strsim_empty() {
-        assert_eq!(strsim("", "hello"), 0.0);
-        assert_eq!(strsim("hello", ""), 0.0);
-        assert_eq!(strsim("", ""), 0.0);
-    }
-
-    #[test]
-    fn test_strsim_short() {
-        let s = strsim("a", "b");
-        assert_eq!(s, 0.0);
-    }
+    use crate::specs::extract_shall;
 
     #[test]
     fn test_extract_shall_simple() {
@@ -853,295 +450,5 @@ mod tests {
         let body = "The system MUST handle errors. Other text.";
         let result = extract_shall(body);
         assert_eq!(result, "The system MUST handle errors");
-    }
-
-    #[test]
-    fn test_find_close_matches() {
-        let sig = Signature {
-            types: vec![TypeDef { name: "task_id".into() }],
-            predicates: vec![],
-            constants: vec![
-                ConstantDef {
-                    name: "T2.1".into(),
-                    type_name: "task_id".into(),
-                    aliases: vec!["migration".into(), "migrate".into()],
-                },
-                ConstantDef {
-                    name: "T3.1".into(),
-                    type_name: "task_id".into(),
-                    aliases: vec!["deployment".into(), "deploy".into()],
-                },
-            ],
-        };
-        let matches = find_close_matches("The migration step", &sig);
-        assert!(!matches.is_empty());
-        assert!(matches.iter().any(|m| m.constant == "T2.1"));
-    }
-
-    #[test]
-    fn test_find_close_matches_no_match() {
-        let sig = Signature {
-            types: vec![TypeDef { name: "task_id".into() }],
-            predicates: vec![],
-            constants: vec![
-                ConstantDef {
-                    name: "T1.1".into(),
-                    type_name: "task_id".into(),
-                    aliases: vec!["setup".into()],
-                },
-            ],
-        };
-        let matches = find_close_matches("xyzzy", &sig);
-        assert!(matches.is_empty());
-    }
-
-    #[test]
-    fn test_find_close_matches_truncated() {
-        let mut constants = Vec::new();
-        for i in 0..20 {
-            constants.push(ConstantDef {
-                name: format!("T{}.1", i),
-                type_name: "task_id".into(),
-                aliases: vec![format!("task{}", i)],
-            });
-        }
-        let sig = Signature {
-            types: vec![TypeDef { name: "task_id".into() }],
-            predicates: vec![],
-            constants,
-        };
-        let matches = find_close_matches("task5", &sig);
-        assert!(matches.len() <= 5);
-        assert!(matches.iter().any(|m| m.constant == "T5.1"));
-    }
-
-    #[test]
-    fn test_generate_directives_grounded() {
-        let result = GroundingResult {
-            candidates: vec![GroundedAtom {
-                predicate: "BEFORE".into(),
-                arguments: vec!["T1.1".into(), "T1.2".into()],
-                confidence: 0.95,
-            }],
-            status: GroundingStatus::Grounded,
-        };
-        let stmt = Statement {
-            source: "test.md#L1".into(),
-            text: "T1.1 BEFORE T1.2".into(),
-        };
-        let sig = Signature {
-            types: vec![],
-            predicates: vec![],
-            constants: vec![],
-        };
-        let dirs = generate_directives(&result, &stmt, &sig);
-        assert!(dirs.is_empty());
-    }
-
-    #[test]
-    fn test_generate_directives_ungroundable() {
-        let result = GroundingResult {
-            candidates: vec![],
-            status: GroundingStatus::Ungroundable,
-        };
-        let stmt = Statement {
-            source: "test.md#L1".into(),
-            text: "The system SHALL be robust".into(),
-        };
-        let sig = Signature {
-            types: vec![],
-            predicates: vec![],
-            constants: vec![],
-        };
-        let dirs = generate_directives(&result, &stmt, &sig);
-        assert_eq!(dirs.len(), 1);
-        assert_eq!(dirs[0].severity, "blocker");
-    }
-
-    #[test]
-    fn test_generate_directives_ambiguous() {
-        let result = GroundingResult {
-            candidates: vec![GroundedAtom {
-                predicate: "BEFORE".into(),
-                arguments: vec!["T2.1".into(), "T2.2".into()],
-                confidence: 0.72,
-            }],
-            status: GroundingStatus::Ambiguous,
-        };
-        let stmt = Statement {
-            source: "test.md#L1".into(),
-            text: "migration before testing".into(),
-        };
-        let sig = Signature {
-            types: vec![TypeDef { name: "task_id".into() }],
-            predicates: vec![],
-            constants: vec![
-                ConstantDef {
-                    name: "T2.1".into(),
-                    type_name: "task_id".into(),
-                    aliases: vec!["migration".into()],
-                },
-                ConstantDef {
-                    name: "T2.2".into(),
-                    type_name: "task_id".into(),
-                    aliases: vec!["testing".into()],
-                },
-            ],
-        };
-        let dirs = generate_directives(&result, &stmt, &sig);
-        assert!(!dirs.is_empty());
-        assert_eq!(dirs[0].severity, "warning");
-    }
-
-    #[test]
-    fn test_find_close_matches_by_constant_name() {
-        let sig = Signature {
-            types: vec![TypeDef { name: "task_id".into() }],
-            predicates: vec![],
-            constants: vec![
-                ConstantDef {
-                    name: "T1.3".into(),
-                    type_name: "task_id".into(),
-                    aliases: vec!["implement appconfig".into()],
-                },
-            ],
-        };
-        // The text "T1.3" should match the constant name directly
-        let matches = find_close_matches("T1.3", &sig);
-        assert!(!matches.is_empty());
-        assert!(matches.iter().any(|m| m.constant == "T1.3"));
-    }
-
-    #[test]
-    fn test_generate_directives_before_one_arg() {
-        let result = GroundingResult {
-            candidates: vec![GroundedAtom {
-                predicate: "BEFORE".into(),
-                arguments: vec!["T3.1".into()],
-                confidence: 0.5,
-            }],
-            status: GroundingStatus::Ambiguous,
-        };
-        let stmt = Statement {
-            source: "test.md#L1".into(),
-            text: "T3.1 SHALL complete before any pool is used".into(),
-        };
-        let sig = Signature {
-            types: vec![TypeDef { name: "task_id".into() }],
-            predicates: vec![],
-            constants: vec![
-                ConstantDef {
-                    name: "T3.1".into(),
-                    type_name: "task_id".into(),
-                    aliases: vec!["setup".into()],
-                },
-            ],
-        };
-        let dirs = generate_directives(&result, &stmt, &sig);
-        assert!(!dirs.is_empty());
-        assert!(dirs.iter().any(|d| d.detail.contains("BEFORE requires two")));
-    }
-
-    // ── Init command tests ──
-
-    #[test]
-    fn test_merge_config_creates_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("openspec").join("config.yaml");
-        assert!(!path.exists());
-        merge_config(&path).unwrap();
-        assert!(path.exists());
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("# groundcontrol init"));
-        assert!(content.contains("Reference tasks by explicit ID"));
-        assert!(content.contains("Write descriptive task descriptions"));
-        // Context must not cite the tool
-        assert!(!content.contains("groundcontrol checks"));
-    }
-
-    #[test]
-    fn test_merge_config_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("openspec").join("config.yaml");
-        merge_config(&path).unwrap();
-        let after_first = std::fs::read_to_string(&path).unwrap();
-        // Run again — should not add duplicates
-        merge_config(&path).unwrap();
-        let after_second = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(after_first, after_second);
-    }
-
-    #[test]
-    fn test_merge_config_preserves_existing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("openspec").join("config.yaml");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let existing = "schema: spec-driven\ncontext: |-\n  Use conventional commits\n";
-        std::fs::write(&path, existing).unwrap();
-        merge_config(&path).unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        // Original content preserved
-        assert!(content.contains("Use conventional commits"));
-        // New content added
-        assert!(content.contains("Reference tasks by explicit ID"));
-        assert!(content.contains("Write descriptive task descriptions"));
-        // Context must not cite the tool
-        assert!(!content.contains("groundcontrol checks"));
-    }
-
-    #[test]
-    fn test_merge_config_rules_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("openspec").join("config.yaml");
-        merge_config(&path).unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        // Context block — tool-agnostic
-        assert!(content.contains("Every task reference in a spec MUST map to a real task ID"));
-        assert!(content.contains("Use explicit N.M IDs"));
-        assert!(content.contains("descriptive descriptions that capture the task's purpose"));
-        // Specs rules
-        assert!(content.contains("Reference tasks by explicit ID"));
-        assert!(content.contains("Use parenthetical syntax"));
-        assert!(content.contains("BEFORE requires two task IDs"));
-        assert!(content.contains("ALWAYS requires one task ID"));
-        // Tasks rules
-        assert!(content.contains("Write descriptive task descriptions"));
-        // Must not cite the tool
-        assert!(!content.contains("groundcontrol checks"));
-    }
-
-    #[test]
-    fn test_yaml_merge_context_appends() {
-        let existing: serde_yaml::Value = serde_yaml::from_str(
-            "context: |-\n  Original context\n",
-        )
-        .unwrap();
-        let mut rules = BTreeMap::new();
-        rules.insert("specs".to_string(), vec![]);
-        let merged = yaml_merge(&existing, "New context", &rules);
-        let ctx = merged["context"].as_str().unwrap();
-        assert!(ctx.contains("Original context"));
-        assert!(ctx.contains("New context"));
-    }
-
-    #[test]
-    fn test_yaml_merge_rules_dedup() {
-        let existing: serde_yaml::Value = serde_yaml::from_str(
-            "rules:\n  specs:\n    - \"Existing rule\"\n",
-        )
-        .unwrap();
-        let mut rules = BTreeMap::new();
-        rules.insert(
-            "specs".to_string(),
-            vec![
-                "Existing rule".to_string(),
-                "New rule".to_string(),
-            ],
-        );
-        let merged = yaml_merge(&existing, "", &rules);
-        let specs = merged["rules"]["specs"].as_sequence().unwrap();
-        assert_eq!(specs.len(), 2);
-        assert!(specs.iter().any(|v| v.as_str() == Some("Existing rule")));
-        assert!(specs.iter().any(|v| v.as_str() == Some("New rule")));
     }
 }
