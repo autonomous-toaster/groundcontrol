@@ -10,7 +10,7 @@
 
 use crate::types::{
     BoundArgument, ConstantDef, GroundedAtom, Grounder, GroundingResult, GroundingStatus,
-    PredicateDef, Signature,
+    MatchKind, PredicateDef, Signature,
 };
 
 /// Predicate keyword groups and their argument ordering.
@@ -101,11 +101,14 @@ impl Grounder for RuleGrounder {
             };
 
             if confidence > 0.0 {
+                let diagnostic =
+                    diagnostic_for(pred_name, pred_def, &args, repeated, &absent_identifiers);
                 candidates.push(GroundedAtom {
                     predicate: pred_name.to_string(),
                     arguments: args,
                     exact,
                     confidence,
+                    diagnostic,
                 });
             }
         }
@@ -125,6 +128,86 @@ impl Grounder for RuleGrounder {
             absent_identifiers,
         }
     }
+}
+
+/// Render a one-line explanation of why this confidence was assigned.
+///
+/// `GroundedAtom` is the published v0.1.0 shape, so the field stays for source
+/// compatibility with existing consumers. It is a *rendering* of the structured
+/// fields (`exact`, the argument provenance, the slot names) — never the source
+/// of truth, and never re-parsed.
+fn diagnostic_for(
+    pred_name: &str,
+    pred_def: Option<&PredicateDef>,
+    args: &[BoundArgument],
+    repeated: bool,
+    absent_identifiers: &[String],
+) -> String {
+    if args.is_empty() {
+        return format!("predicate {} matched but no argument was found", pred_name);
+    }
+    if repeated {
+        let (first, second) = repeated_slot_pair(args).unwrap_or((0, 1));
+        let slot = |i: usize| {
+            pred_def
+                .and_then(|p| p.arguments.get(i))
+                .map(|a| a.name.as_str())
+                .unwrap_or("?")
+        };
+        return format!(
+            "slots '{}' and '{}' require different tasks but '{}' fills both",
+            slot(first),
+            slot(second),
+            args[first].constant,
+        );
+    }
+    let expected = pred_def.map(|p| p.arguments.len()).unwrap_or(0);
+    let short = expected > 0 && args.len() < expected;
+    if short {
+        let slots = pred_def
+            .map(|p| {
+                p.arguments
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let mut msg = format!(
+            "expected {} argument(s) ({}) but found {}",
+            expected,
+            slots,
+            args.len()
+        );
+        if !absent_identifiers.is_empty() {
+            msg.push_str(&format!(
+                "; {} is not declared by this signature",
+                absent_identifiers.join(", ")
+            ));
+        }
+        return msg;
+    }
+    if args.iter().all(BoundArgument::is_exact) {
+        return format!("all {} argument(s) matched by explicit name", args.len());
+    }
+    let aliases: Vec<String> = args
+        .iter()
+        .filter_map(|a| match &a.matched {
+            MatchKind::Name => None,
+            MatchKind::Alias(alias) => Some(format!("{} as '{}'", a.constant, alias)),
+        })
+        .collect();
+    format!("matched by alias: {}", aliases.join(", "))
+}
+
+/// Indices of the first pair of slots holding the same constant.
+fn repeated_slot_pair(args: &[BoundArgument]) -> Option<(usize, usize)> {
+    args.iter().enumerate().find_map(|(i, a)| {
+        args.iter()
+            .skip(i + 1)
+            .position(|b| b.constant == a.constant)
+            .map(|j| (i, i + 1 + j))
+    })
 }
 
 /// Decide the overall status. Order matters: a contradiction is reported even

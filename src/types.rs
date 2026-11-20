@@ -103,6 +103,12 @@ pub struct GroundedAtom {
     pub arguments: Vec<BoundArgument>,
     /// True when every argument matched by name (no alias was used).
     pub exact: bool,
+    /// One-line explanation of why `confidence` was assigned, rendered from
+    /// `exact`, the argument provenance, the predicate's slot names and the
+    /// result's absent identifiers. Present for source compatibility with the
+    /// published v0.1.0 shape; it is a convenience rendering, never the source
+    /// of truth. Callers that need to act should read the structured fields.
+    pub diagnostic: String,
     /// Structural confidence, not correctness. Values:
     ///
     /// | condition                                         | value |
@@ -131,10 +137,20 @@ impl GroundedAtom {
 pub enum GroundingStatus {
     /// At least one candidate with confidence >= 0.8.
     Grounded,
-    /// Arguments are partially known: the predicate matched, but the argument
-    /// list is short — either because the text names constants of this change
-    /// that the signature does not declare, or because a declared (>= 2 slot)
-    /// predicate could not be filled.
+    /// The statement is right in kind but refers to something this signature
+    /// cannot resolve. Two causes, both reported in data rather than here:
+    ///
+    /// - `absent_identifiers` is non-empty: the text names constants of a
+    ///   declared type that no constant provides ("T2.6 is not a task of this
+    ///   change").
+    /// - `absent_identifiers` is empty: a declared predicate needing two or
+    ///   more slots was only partially filled.
+    ///
+    /// Callers that need the cause must read the field:
+    /// `incomplete && !absent_identifiers.is_empty()` is the foreign-reference
+    /// case, `incomplete && absent_identifiers.is_empty()` the arity case. The
+    /// status alone deliberately does not encode it, because the foreign case is
+    /// a *fact about the signature*, not a property of the statement.
     Incomplete,
     /// Candidates exist but all below 0.8, and nothing better explains why.
     Ambiguous,
@@ -364,12 +380,14 @@ mod tests {
             ],
             exact: false,
             confidence: 0.95,
+            diagnostic: "matched by alias: T1.2 as 'deps'".into(),
         };
         assert_eq!(atom.predicate, "BEFORE");
         assert_eq!(atom.arguments.len(), 2);
         assert_eq!(atom.names(), vec!["T1.1", "T1.2"]);
         assert!(atom.confidence > 0.9);
         assert!(!atom.exact);
+        assert!(atom.diagnostic.contains("alias"));
     }
 
     #[test]
