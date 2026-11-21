@@ -136,15 +136,24 @@ pub(super) fn appears_in(c: &ConstantDef, nl: &str, lower: &str) -> bool {
 /// would match T5.1 twice and certify a self-ordering constraint. A match only
 /// counts when neither side continues the identifier.
 pub(super) fn contains_name(text: &str, name: &str) -> bool {
+    name_index(text, name).is_some()
+}
+
+/// Byte offset of the first boundary-valid occurrence of `name` in `text`.
+///
+/// Position, not just presence, is what lets a caller bind a slot by the order
+/// the author wrote the tasks in rather than by the order the signature happens
+/// to declare them.
+pub(super) fn name_index(text: &str, name: &str) -> Option<usize> {
     if name.is_empty() {
-        return false;
+        return None;
     }
     let mut from = 0;
     while let Some(rel) = text[from..].find(name) {
         let start = from + rel;
         let end = start + name.len();
         if boundary_before(text, start) && boundary_after(text, end) {
-            return true;
+            return Some(start);
         }
         // Advance one character, not one match, so overlapping runs are tried.
         match text[start..].chars().next() {
@@ -152,7 +161,7 @@ pub(super) fn contains_name(text: &str, name: &str) -> bool {
             None => break,
         }
     }
-    false
+    None
 }
 
 /// The identifier must not be glued to a preceding one ("XT5.1").

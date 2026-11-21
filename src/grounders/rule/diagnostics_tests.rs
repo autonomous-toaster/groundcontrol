@@ -307,10 +307,15 @@ fn test_short_argument_list_is_incomplete() {
 
 #[test]
 fn test_undeclared_predicate_is_not_contradictory_and_not_incomplete() {
-    // ALWAYS is not declared, so there is no arity to fall short of. The
-    // single filled slot reaches the 0.8 threshold and no distinctness rule
-    // applies (no slot names), so it grounds — an undeclared predicate is
-    // never reported Contradictory.
+    // ALWAYS is not declared, so there is no arity to fall short of, and no
+    // distinctness rule applies (no slot names): an undeclared predicate is
+    // never reported Contradictory or Incomplete.
+    //
+    // The slot is filled by an alias here. This used to score 0.8 because
+    // `take(1)` built every argument with `BoundArgument::by_name` regardless
+    // of how it matched — the text never contains "T1.1". Since single-slot
+    // binding now reports the real match kind, the atom is correctly marked
+    // inexact and scores 0.5, which is Ambiguous rather than Grounded.
     let sig = Signature {
         types: vec![TypeDef {
             name: "task_id".into(),
@@ -323,9 +328,11 @@ fn test_undeclared_predicate_is_not_contradictory_and_not_incomplete() {
         }],
     };
     let result = RuleGrounder.ground("alpha SHALL ALWAYS be available", &sig);
-    assert_eq!(result.candidates[0].confidence, 0.8);
-    assert_eq!(result.status, GroundingStatus::Grounded);
+    assert_eq!(result.candidates[0].confidence, 0.5);
+    assert!(!result.candidates[0].exact);
+    assert_eq!(result.status, GroundingStatus::Ambiguous);
     assert_ne!(result.status, GroundingStatus::Contradictory);
+    assert_ne!(result.status, GroundingStatus::Incomplete);
 }
 
 /// Ground the AT_MOST_ONE reproducer against a signature where the second

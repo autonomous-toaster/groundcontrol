@@ -116,3 +116,67 @@ fn test_t1_1_and_t1_10_are_never_confused_in_either_direction() {
         c.unused_identifiers[0],
     );
 }
+
+// ── B3: single-slot predicates bind the first mention in the text ──
+
+fn always_sig(names: &[&str]) -> Signature {
+    Signature {
+        types: vec![TypeDef {
+            name: "task_id".into(),
+        }],
+        predicates: vec![PredicateDef {
+            name: "ALWAYS".into(),
+            arguments: vec![ArgSlot {
+                name: "target".into(),
+                type_name: "task_id".into(),
+            }],
+        }],
+        constants: names
+            .iter()
+            .map(|n| ConstantDef {
+                name: (*n).to_string(),
+                type_name: "task_id".into(),
+                aliases: vec![],
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn test_single_slot_binds_the_subject_not_the_signature_first() {
+    let sig = always_sig(&["T1.1", "T1.10"]);
+    let result = RuleGrounder.ground("T1.10 SHALL ALWAYS mention T1.1", &sig);
+    assert_eq!(result.candidates[0].names(), vec!["T1.10"]);
+    assert_eq!(result.unused_identifiers, vec!["T1.1".to_string()]);
+    assert!(result.candidates[0].exact);
+}
+
+#[test]
+fn test_single_slot_follows_the_text_in_the_other_ordering() {
+    // Same signature, same pair, reversed sentence: the binding must follow
+    // the text, and the unbound one must now be the later mention.
+    let sig = always_sig(&["T1.1", "T1.10"]);
+    let result = RuleGrounder.ground("T1.1 SHALL ALWAYS mention T1.10", &sig);
+    assert_eq!(result.candidates[0].names(), vec!["T1.1"]);
+    assert_eq!(result.unused_identifiers, vec!["T1.10".to_string()]);
+}
+
+#[test]
+fn test_single_slot_unchanged_when_only_one_task_is_named() {
+    let sig = always_sig(&["T1.1", "T1.2"]);
+    let result = RuleGrounder.ground("T1.2 SHALL ALWAYS be available", &sig);
+    assert_eq!(result.candidates[0].names(), vec!["T1.2"]);
+    assert!(result.unused_identifiers.is_empty());
+    assert_eq!(result.status, GroundingStatus::Grounded);
+}
+
+#[test]
+fn test_single_slot_binding_by_alias_is_reported_as_an_alias() {
+    let mut sig = always_sig(&["T1.1", "T2.2"]);
+    sig.constants[1].aliases = vec!["rollback".into()];
+    let result = RuleGrounder.ground("rollback SHALL ALWAYS be available", &sig);
+    assert_eq!(result.candidates[0].names(), vec!["T2.2"]);
+    assert!(!result.candidates[0].exact);
+    assert_eq!(result.candidates[0].confidence, 0.9);
+    assert_eq!(result.status, GroundingStatus::Grounded);
+}

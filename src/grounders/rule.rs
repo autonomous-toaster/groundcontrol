@@ -13,7 +13,7 @@ use crate::types::{
     MatchKind, PredicateDef, Signature,
 };
 
-use identifiers::{appears_in, contains_name, extract_absent_identifiers};
+use identifiers::{appears_in, contains_name, extract_absent_identifiers, name_index};
 
 mod identifiers;
 
@@ -396,12 +396,58 @@ fn assign_arguments(
                 take(2)
             }
         }
-        "ALWAYS" => take(1),
+        // A single-slot predicate has to pick exactly one of the tasks the
+        // statement names. Picking the first in *signature* order makes the
+        // vocabulary dictate the reading of the sentence: in "T1.10 SHALL
+        // ALWAYS mention T1.1" the subject is T1.10 and the object T1.1, so
+        // binding by signature order reports T1.1 as named-but-unused, which is
+        // a false statement about the author's text. Bind the earliest mention
+        // instead.
+        "ALWAYS" => bind_first_in_text(matched, nl, allow_alias)
+            .into_iter()
+            .collect(),
         _ => matched
             .iter()
             .map(|c| BoundArgument::by_name(&c.name))
             .collect(),
     }
+}
+
+/// Bind a single-slot predicate to the constant mentioned earliest in the text.
+///
+/// Ties and absent positions fall back to signature order, so behaviour is
+/// unchanged for every statement that names one task or none.
+fn bind_first_in_text(
+    matched: &[&ConstantDef],
+    nl: &str,
+    allow_alias: bool,
+) -> Option<BoundArgument> {
+    let lower = nl.to_lowercase();
+    let first = matched
+        .iter()
+        .enumerate()
+        .filter_map(|(order, c)| {
+            let by_name = name_index(nl, &c.name);
+            let by_alias = if allow_alias {
+                c.aliases
+                    .iter()
+                    .filter_map(|a| name_index(&lower, &a.to_lowercase()))
+                    .min()
+            } else {
+                None
+            };
+            let pos = match (by_name, by_alias) {
+                (Some(n), Some(a)) => Some(n.min(a)),
+                (Some(n), None) => Some(n),
+                (None, Some(a)) => Some(a),
+                (None, None) => None,
+            };
+            // `order` breaks ties deterministically, preserving the old choice.
+            pos.map(|p| (p, order, *c))
+        })
+        .min_by_key(|(p, order, _)| (*p, *order));
+    let (_, _, constant) = first?;
+    bind_slot(&[constant], nl, allow_alias)
 }
 
 /// Bind one slot to a constant, preferring an explicit name over an alias.
