@@ -46,8 +46,12 @@ pub(super) fn name_shape(name: &str) -> Vec<CharClass> {
 /// to match. This keeps the grounder domain-agnostic — no task-ID syntax is
 /// hard-coded anywhere.
 pub(super) fn extract_absent_identifiers(nl: &str, sig: &Signature) -> Vec<String> {
-    // Longest constant name per type; its shape is the type's identifier pattern.
-    let mut patterns: Vec<(Vec<CharClass>, usize)> = Vec::new();
+    // One pattern per declared constant type, taken from that type's longest
+    // constant name. `name_shape` collapses runs, so T1.1 and T2.10 share a
+    // pattern: the run *lengths* are not part of the shape, and must never be,
+    // because a signature that happens to contain only short ids would
+    // otherwise cap the length of the ids it can recognise.
+    let mut patterns: Vec<Vec<CharClass>> = Vec::new();
     for type_def in &sig.types {
         let Some(longest) = sig
             .constants
@@ -64,8 +68,7 @@ pub(super) fn extract_absent_identifiers(nl: &str, sig: &Signature) -> Vec<Strin
         if shape.len() < 2 {
             continue;
         }
-        let max_len = longest.chars().count().min(MAX_IDENTIFIER_LEN);
-        patterns.push((shape, max_len));
+        patterns.push(shape);
     }
     if patterns.is_empty() {
         return Vec::new();
@@ -78,14 +81,20 @@ pub(super) fn extract_absent_identifiers(nl: &str, sig: &Signature) -> Vec<Strin
 
     // For each start position, try every length and shape; record the longest
     // match so that trailing punctuation is not appended to the identifier.
+    //
+    // Boundaries are enforced here, not just in `contains_name`: without them
+    // "T2.10" is reported as its prefix "T2.1", which accuses the author of
+    // citing a task they did not write — and, when the prefix happens to be
+    // declared, silently swallows the real reference instead.
     let mut i = 0;
     while i < chars.len() {
         let mut best: Option<usize> = None;
         let limit = (chars.len() - i).min(MAX_IDENTIFIER_LEN);
         for len in 2..=limit {
-            let candidate: String = chars[i..i + len].iter().collect();
+            let end = i + len;
+            let candidate: String = chars[i..end].iter().collect();
             let shape = name_shape(&candidate);
-            if fits_any(&shape, len, &patterns) {
+            if fits_any(&shape, &patterns) && boundary_before(nl, i) && boundary_after(nl, end) {
                 best = Some(len);
             }
         }
@@ -105,15 +114,8 @@ pub(super) fn extract_absent_identifiers(nl: &str, sig: &Signature) -> Vec<Strin
 
 /// Does a candidate's shape match one of the type patterns?
 /// Identifiers start with a letter; this keeps us off numbers in prose.
-pub(super) fn fits_any(
-    shape: &[CharClass],
-    len: usize,
-    patterns: &[(Vec<CharClass>, usize)],
-) -> bool {
-    shape.first() == Some(&CharClass::Alpha)
-        && patterns
-            .iter()
-            .any(|(pattern, max_len)| len <= *max_len && shape == pattern.as_slice())
+pub(super) fn fits_any(shape: &[CharClass], patterns: &[Vec<CharClass>]) -> bool {
+    shape.first() == Some(&CharClass::Alpha) && patterns.iter().any(|p| shape == p.as_slice())
 }
 
 /// Check if a constant appears in the NL text (by name or alias).

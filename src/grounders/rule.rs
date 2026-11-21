@@ -432,4 +432,6 @@ fn bind_slot(matched: &[&ConstantDef], slice: &str, allow_alias: bool) -> Option
 #[cfg(test)]
 mod diagnostics_tests;
 #[cfg(test)]
+mod identifier_tests;
+#[cfg(test)]
 mod tests;
