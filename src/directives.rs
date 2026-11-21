@@ -15,6 +15,7 @@ pub fn generate_directives(
     sig: &types::Signature,
 ) -> Vec<Directive> {
     let mut dirs = absent_identifier_directives(result, stmt);
+    dirs.extend(unused_identifier_directives(result, stmt));
 
     match result.status {
         GroundingStatus::Grounded => {}
@@ -97,6 +98,34 @@ fn absent_identifier_directives(
             detail: format!("'{}' is not a task of this signature.", id),
             suggested_action: format!(
                 "Add '{}' to tasks.md, or reference a task this change declares.",
+                id,
+            ),
+            close_matches: None,
+        })
+        .collect()
+}
+
+/// The statement names a task the grounding never bound. That is our own
+/// weakness — a slot was filled from something weaker while an explicit
+/// reference went unused — so the suggestion never asks the author to write
+/// more task IDs.
+fn unused_identifier_directives(
+    result: &types::GroundingResult,
+    stmt: &Statement,
+) -> Vec<Directive> {
+    result
+        .unused_identifiers
+        .iter()
+        .map(|id| Directive {
+            severity: "warning".to_string(),
+            element: stmt.source.clone(),
+            detail: format!(
+                "'{}' is named in this requirement but was not bound to the constraint.",
+                id,
+            ),
+            suggested_action: format!(
+                "Check that the constraint relates '{}' to a different task, or that another \
+                 task does not shadow it.",
                 id,
             ),
             close_matches: None,

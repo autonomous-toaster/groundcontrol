@@ -87,6 +87,7 @@ fn test_generate_directives_grounded() {
         }],
         status: GroundingStatus::Grounded,
         absent_identifiers: vec![],
+        unused_identifiers: vec![],
     };
     let stmt = Statement {
         source: "test.md#L1".into(),
@@ -107,6 +108,7 @@ fn test_generate_directives_ungroundable() {
         candidates: vec![],
         status: GroundingStatus::Ungroundable,
         absent_identifiers: vec![],
+        unused_identifiers: vec![],
     };
     let stmt = Statement {
         source: "test.md#L1".into(),
@@ -137,6 +139,7 @@ fn test_generate_directives_ambiguous() {
         }],
         status: GroundingStatus::Ambiguous,
         absent_identifiers: vec![],
+        unused_identifiers: vec![],
     };
     let stmt = Statement {
         source: "test.md#L1".into(),
@@ -196,6 +199,7 @@ fn test_generate_directives_before_one_arg() {
         }],
         status: GroundingStatus::Incomplete,
         absent_identifiers: vec![],
+        unused_identifiers: vec![],
     };
     let stmt = Statement {
         source: "test.md#L1".into(),
@@ -268,6 +272,7 @@ fn test_absent_identifier_directive_names_the_identifier() {
         candidates: vec![],
         status: GroundingStatus::Incomplete,
         absent_identifiers: vec!["T2.6".into()],
+        unused_identifiers: vec![],
     };
     let stmt = Statement {
         source: "spec.md#L9".into(),
@@ -295,6 +300,7 @@ fn test_absent_identifier_suppresses_add_task_ids_advice() {
         }],
         status: GroundingStatus::Incomplete,
         absent_identifiers: vec!["T2.6".into()],
+        unused_identifiers: vec![],
     };
     let stmt = Statement {
         source: "spec.md#L9".into(),
@@ -325,6 +331,7 @@ fn test_contradiction_directive_names_slots() {
         }],
         status: GroundingStatus::Contradictory,
         absent_identifiers: vec![],
+        unused_identifiers: vec![],
     };
     let stmt = Statement {
         source: "spec.md#L4".into(),
@@ -357,6 +364,7 @@ fn test_alias_directive_comes_from_provenance() {
         }],
         status: GroundingStatus::Grounded,
         absent_identifiers: vec![],
+        unused_identifiers: vec![],
     };
     let stmt = Statement {
         source: "spec.md#L4".into(),

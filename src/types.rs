@@ -184,6 +184,16 @@ pub struct GroundingResult {
     /// E.g. "T2.6" when the signature only declares "T1.1".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub absent_identifiers: Vec<String>,
+    /// The mirror of `absent_identifiers`: constants the text **names
+    /// explicitly** that the grounding did not bind to any slot.
+    ///
+    /// Empty when no candidate was produced at all — there the diagnosis is the
+    /// missing predicate, not the unused reference. Non-empty means the grounder
+    /// dropped a task the author wrote, which is a grounding weakness, not a
+    /// statement defect: the slots were filled from something weaker (an alias,
+    /// or a constant that shares a prefix) while a named constant went unused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unused_identifiers: Vec<String>,
 }
 
 // ── Directives (feedback to the LLM) ──
@@ -216,6 +226,10 @@ pub struct GroundedInput {
     pub text: String,
     pub groundings: Vec<GroundedAtom>,
     pub status: GroundingStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub absent_identifiers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unused_identifiers: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub directives: Vec<Directive>,
 }
@@ -341,6 +355,7 @@ mod tests {
             candidates: vec![],
             status: GroundingStatus::Incomplete,
             absent_identifiers: vec!["T2.6".into()],
+            unused_identifiers: vec![],
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"T2.6\""));
@@ -356,6 +371,7 @@ mod tests {
             candidates: vec![],
             status: GroundingStatus::Ungroundable,
             absent_identifiers: vec![],
+            unused_identifiers: vec![],
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(!json.contains("absent_identifiers"));

@@ -108,12 +108,20 @@ fn run_check(change: Option<String>, format: &str, stdin: bool) -> anyhow::Resul
         || merged.summary.ambiguous > 0
         || merged.summary.incomplete > 0
         || merged.summary.contradictory > 0;
+    // A grounded statement that left a named task unbound is a grounding
+    // weakness worth showing, but not a spec defect: report it without failing.
+    let has_notes = merged
+        .inputs
+        .iter()
+        .any(|i| !i.unused_identifiers.is_empty());
 
-    if has_issues {
+    if has_issues || has_notes {
         match format {
             "json" => println!("{}", serde_json::to_string_pretty(&merged)?),
             _ => print_human(&merged),
         }
+    }
+    if has_issues {
         std::process::exit(1);
     }
 
@@ -139,6 +147,8 @@ fn check_single(change_dir: &std::path::Path, change_name: &str) -> anyhow::Resu
             text: stmt.text.clone(),
             groundings: result.candidates,
             status: result.status,
+            absent_identifiers: result.absent_identifiers,
+            unused_identifiers: result.unused_identifiers,
             directives,
         });
     }
@@ -346,6 +356,12 @@ fn print_human(output: &CheckOutput) {
                 g.predicate,
                 g.names().join(", ")
             );
+            if !input.unused_identifiers.is_empty() {
+                println!(
+                    "   unbound although named: {}",
+                    input.unused_identifiers.join(", ")
+                );
+            }
         }
     }
 

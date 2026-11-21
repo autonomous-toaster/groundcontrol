@@ -129,11 +129,13 @@ impl Grounder for RuleGrounder {
         });
 
         let status = classify(sig, &candidates, &absent_identifiers);
+        let unused_identifiers = unused_identifiers(sig, nl, &candidates);
 
         GroundingResult {
             candidates,
             status,
             absent_identifiers,
+            unused_identifiers,
         }
     }
 }
@@ -214,6 +216,27 @@ fn diagnostic_for(
         })
         .collect();
     format!("matched by alias: {}", aliases.join(", "))
+}
+
+/// Constants the text names explicitly that the grounding left unbound.
+///
+/// The mirror of `absent_identifiers`, and the signal that exposes a slot filled
+/// from something weaker while a task the author actually wrote went unused.
+/// Empty when no candidate was produced: there the missing predicate is the
+/// diagnosis, and every named constant would be "unused" for the wrong reason.
+fn unused_identifiers(sig: &Signature, nl: &str, candidates: &[GroundedAtom]) -> Vec<String> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let bound: std::collections::HashSet<&str> = candidates
+        .iter()
+        .flat_map(|c| c.arguments.iter().map(|a| a.constant.as_str()))
+        .collect();
+    sig.constants
+        .iter()
+        .filter(|c| contains_name(nl, &c.name) && !bound.contains(c.name.as_str()))
+        .map(|c| c.name.clone())
+        .collect()
 }
 
 /// Decide the overall status. Order matters: a contradiction is reported even

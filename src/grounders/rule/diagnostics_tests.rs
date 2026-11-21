@@ -453,3 +453,57 @@ fn test_named_twice_is_still_a_contradiction() {
     let result = RuleGrounder.ground("T5.15 SHALL write BEFORE T5.15 SHALL seal", &sig);
     assert_eq!(result.status, GroundingStatus::Contradictory);
 }
+
+// ── Inverse diagnostic: named but unbound ──
+
+#[test]
+fn test_unused_identifier_reports_a_shadowed_named_task() {
+    // ALWAYS takes one slot; the text names two tasks. The second is named
+    // but cannot be bound, and the caller must be able to see that.
+    let sig = prefix_sig();
+    let result = RuleGrounder.ground("T5.15 SHALL ALWAYS mention T5.16", &sig);
+    assert_eq!(result.unused_identifiers, vec!["T5.16".to_string()]);
+    assert!(result.absent_identifiers.is_empty());
+}
+
+#[test]
+fn test_unused_identifier_is_empty_when_every_named_task_is_bound() {
+    let sig = prefix_sig();
+    let result = RuleGrounder.ground("T5.15 SHALL run BEFORE T5.16 SHALL stop", &sig);
+    assert!(result.unused_identifiers.is_empty());
+}
+
+#[test]
+fn test_unused_identifier_is_empty_without_a_candidate() {
+    // No predicate: every named constant would be "unused" for the wrong
+    // reason, so the field stays empty and the status carries the diagnosis.
+    let sig = prefix_sig();
+    let result = RuleGrounder.ground("T5.15 does something", &sig);
+    assert_eq!(result.status, GroundingStatus::Ungroundable);
+    assert!(result.unused_identifiers.is_empty());
+}
+
+#[test]
+fn test_unused_identifier_ignores_prefix_collisions() {
+    // T5.1 is a prefix of T5.15/T5.16 but is not named, so it is neither
+    // bound nor reported as unused.
+    let sig = prefix_sig();
+    let result = RuleGrounder.ground(
+        "T5.15 SHALL admit an input BEFORE T5.16 SHALL reject it",
+        &sig,
+    );
+    assert!(result.unused_identifiers.is_empty());
+}
+
+#[test]
+fn test_unused_identifier_survives_json() {
+    let result = GroundingResult {
+        candidates: vec![],
+        status: GroundingStatus::Grounded,
+        absent_identifiers: vec![],
+        unused_identifiers: vec!["T5.16".into()],
+    };
+    let json = serde_json::to_string(&result).unwrap();
+    assert!(json.contains("unused_identifiers"));
+    assert!(json.contains("T5.16"));
+}
