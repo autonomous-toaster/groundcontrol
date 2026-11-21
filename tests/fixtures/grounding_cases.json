@@ -1,0 +1,178 @@
+[
+  {
+    "expected": {
+      "absent_identifiers": [],
+      "candidates": [
+        {
+          "arguments": [
+            {
+              "constant": "T1.10",
+              "kind": "name"
+            }
+          ],
+          "confidence": 0.95,
+          "exact": true,
+          "predicate": "ALWAYS"
+        }
+      ],
+      "status": "grounded",
+      "unused_identifiers": [
+        "T1.1"
+      ]
+    },
+    "name": "single_slot_subject_is_later_in_signature",
+    "text": "T1.10 SHALL ALWAYS mention T1.1"
+  },
+  {
+    "expected": {
+      "absent_identifiers": [],
+      "candidates": [
+        {
+          "arguments": [
+            {
+              "constant": "T1.1",
+              "kind": "name"
+            }
+          ],
+          "confidence": 0.95,
+          "exact": true,
+          "predicate": "ALWAYS"
+        }
+      ],
+      "status": "grounded",
+      "unused_identifiers": [
+        "T1.10"
+      ]
+    },
+    "name": "single_slot_reversed_sentence",
+    "text": "T1.1 SHALL ALWAYS mention T1.10"
+  },
+  {
+    "expected": {
+      "absent_identifiers": [
+        "T2.10"
+      ],
+      "candidates": [
+        {
+          "arguments": [
+            {
+              "constant": "T1.1",
+              "kind": "name"
+            }
+          ],
+          "confidence": 0.5,
+          "exact": true,
+          "predicate": "BEFORE"
+        }
+      ],
+      "status": "incomplete",
+      "unused_identifiers": []
+    },
+    "name": "absent_multi_digit_identifier",
+    "text": "T2.10 SHALL complete BEFORE T1.1 SHALL start."
+  },
+  {
+    "expected": {
+      "absent_identifiers": [
+        "T1.10"
+      ],
+      "candidates": [
+        {
+          "arguments": [
+            {
+              "constant": "T1.1",
+              "kind": "name"
+            }
+          ],
+          "confidence": 0.5,
+          "exact": true,
+          "predicate": "BEFORE"
+        }
+      ],
+      "status": "incomplete",
+      "unused_identifiers": []
+    },
+    "name": "absent_multi_digit_matches_declared_prefix",
+    "text": "T1.10 SHALL complete BEFORE T1.1 SHALL start."
+  },
+  {
+    "expected": {
+      "absent_identifiers": [],
+      "candidates": [
+        {
+          "arguments": [
+            {
+              "constant": "T1.10",
+              "kind": "name"
+            },
+            {
+              "constant": "T1.2",
+              "kind": "name"
+            }
+          ],
+          "confidence": 0.95,
+          "exact": true,
+          "predicate": "BEFORE"
+        }
+      ],
+      "status": "grounded",
+      "unused_identifiers": []
+    },
+    "name": "boundary_does_not_bind_a_prefix",
+    "text": "T1.10 SHALL complete BEFORE T1.2 SHALL start."
+  },
+  {
+    "expected": {
+      "absent_identifiers": [],
+      "candidates": [
+        {
+          "arguments": [
+            {
+              "alias": "migration",
+              "constant": "T2.1",
+              "kind": "alias"
+            },
+            {
+              "alias": "testing",
+              "constant": "T2.2",
+              "kind": "alias"
+            }
+          ],
+          "confidence": 0.9,
+          "exact": false,
+          "predicate": "BEFORE"
+        }
+      ],
+      "status": "grounded",
+      "unused_identifiers": []
+    },
+    "name": "alias_match_is_reported_as_alias",
+    "text": "The migration must finish before testing starts"
+  },
+  {
+    "expected": {
+      "absent_identifiers": [],
+      "candidates": [
+        {
+          "arguments": [
+            {
+              "constant": "T1.1",
+              "kind": "name"
+            },
+            {
+              "constant": "T1.1",
+              "kind": "name"
+            }
+          ],
+          "confidence": 0.5,
+          "exact": true,
+          "predicate": "BEFORE"
+        }
+      ],
+      "status": "contradictory",
+      "unused_identifiers": []
+    },
+    "name": "self_relation_is_contradictory",
+    "text": "T1.1 SHALL write the header BEFORE T1.1 SHALL seal it"
+  }
+]

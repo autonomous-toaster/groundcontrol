@@ -72,3 +72,9 @@ check-file-sizes max="500" tolerance="10":
         fi
     done < <(find src -name '*.rs' | grep -v '/tests/')
     [ $fail -eq 0 ] && echo "✓ all source files within $MAX lines (target $TARGET + ${TOL}% tolerance)"
+
+# Regenerate the published grounding fixture (tests/fixtures/grounding_cases.json).
+# Review the diff before committing: this file is the contract consumers diff against.
+fixtures:
+    UPDATE_FIXTURES=1 cargo test --quiet --test grounding_fixtures
+    @git --no-pager diff --stat tests/fixtures/grounding_cases.json || true
