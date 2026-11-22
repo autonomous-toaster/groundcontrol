@@ -76,7 +76,7 @@ pub fn create_fresh_config() -> String {
         GROUNDCONTROL_CONTEXT,
         &groundcontrol_rules(),
     );
-    let output = serde_yaml::to_string(&merged).unwrap();
+    let output = serde_yaml::to_string(&merged).unwrap_or_default();
     format!("# groundcontrol init\n{}", output)
 }
 
@@ -100,7 +100,12 @@ pub fn yaml_merge(
             }
         }
         _ => {
-            merged["context"] = serde_yaml::Value::String(new_context.to_string());
+            if let serde_yaml::Value::Mapping(map) = &mut merged {
+                map.insert(
+                    serde_yaml::Value::String("context".to_string()),
+                    serde_yaml::Value::String(new_context.to_string()),
+                );
+            }
         }
     }
 
@@ -128,7 +133,12 @@ pub fn yaml_merge(
         rules.insert(key, serde_yaml::Value::Sequence(merged_items));
     }
 
-    merged["rules"] = serde_yaml::Value::Mapping(rules);
+    if let serde_yaml::Value::Mapping(map) = &mut merged {
+        map.insert(
+            serde_yaml::Value::String("rules".to_string()),
+            serde_yaml::Value::Mapping(rules),
+        );
+    }
     merged
 }
 

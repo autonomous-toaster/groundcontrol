@@ -101,20 +101,28 @@ pub(super) fn extract_absent_identifiers(nl: &str, sig: &Signature) -> Vec<Strin
         let limit = (chars.len() - i).min(MAX_IDENTIFIER_LEN);
         for len in 2..=limit {
             let end = i + len;
-            let candidate: String = chars[i..end].iter().collect();
+            let Some(candidate) = chars.get(i..end) else {
+                continue;
+            };
+            let candidate: String = candidate.iter().collect();
             let shape = name_shape(&candidate);
-            // `offsets[i]` / `offsets[end]` convert character indices to byte
-            // offsets; `end <= chars.len()` always, so the table covers them.
-            if fits_any(&shape, &patterns)
-                && boundary_before(nl, offsets[i])
-                && boundary_after(nl, offsets[end])
+            // `offsets` converts character indices to byte offsets. Both lookups
+            // are total: a missing entry simply cannot form an identifier.
+            let (Some(from), Some(to)) = (offsets.get(i), offsets.get(end)) else {
+                continue;
+            };
+            if fits_any(&shape, &patterns) && boundary_before(nl, *from) && boundary_after(nl, *to)
             {
                 best = Some(len);
             }
         }
         match best {
             Some(len) => {
-                let candidate: String = chars[i..i + len].iter().collect();
+                let Some(span) = chars.get(i..i + len) else {
+                    i += 1;
+                    continue;
+                };
+                let candidate: String = span.iter().collect();
                 if !known.contains(candidate.as_str()) && !absent.contains(&candidate) {
                     absent.push(candidate);
                 }
@@ -166,18 +174,14 @@ pub(super) fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
     }
     let wanted = needle.chars().count();
     for (byte, _) in haystack.char_indices() {
-        let mut hay = haystack[byte..].chars();
-        let mut matched = true;
-        for n in needle.chars() {
-            match hay.next() {
-                Some(h) if h.eq_ignore_ascii_case(&n) => {}
-                _ => {
-                    matched = false;
-                    break;
-                }
-            }
-        }
-        if matched && haystack[byte..].chars().take(wanted).count() == wanted {
+        let rest = haystack.get(byte..)?;
+        let enough = rest.chars().count() >= wanted;
+        let matched = enough
+            && rest
+                .chars()
+                .zip(needle.chars())
+                .all(|(h, n)| h.eq_ignore_ascii_case(&n));
+        if matched {
             return Some(byte);
         }
     }
@@ -194,14 +198,17 @@ pub(super) fn name_index(text: &str, name: &str) -> Option<usize> {
         return None;
     }
     let mut from = 0;
-    while let Some(rel) = text[from..].find(name) {
+    while let Some(tail) = text.get(from..) {
+        let Some(rel) = tail.find(name) else {
+            break;
+        };
         let start = from + rel;
         let end = start + name.len();
         if boundary_before(text, start) && boundary_after(text, end) {
             return Some(start);
         }
         // Advance one character, not one match, so overlapping runs are tried.
-        match text[start..].chars().next() {
+        match text.get(start..).and_then(|t| t.chars().next()) {
             Some(c) => from = start + c.len_utf8(),
             None => break,
         }
@@ -211,7 +218,12 @@ pub(super) fn name_index(text: &str, name: &str) -> Option<usize> {
 
 /// The identifier must not be glued to a preceding one ("XT5.1").
 pub(super) fn boundary_before(text: &str, at: usize) -> bool {
-    match text[..at].chars().next_back() {
+    // An offset that is not a char boundary cannot start an identifier, so the
+    // total lookup answering None is the conservative answer, not a panic.
+    let Some(head) = text.get(..at) else {
+        return false;
+    };
+    match head.chars().next_back() {
         None => true,
         Some(c) => !is_ident_char(c),
     }
@@ -221,7 +233,10 @@ pub(super) fn boundary_before(text: &str, at: usize) -> bool {
 /// A trailing "." is sentence punctuation — "T5.1." ends a sentence, "T5.1.5"
 /// continues an identifier — so the dot only counts when no digit follows.
 pub(super) fn boundary_after(text: &str, at: usize) -> bool {
-    let mut it = text[at..].chars();
+    let Some(tail) = text.get(at..) else {
+        return false;
+    };
+    let mut it = tail.chars();
     match it.next() {
         None => true,
         Some('.') => !it.next().is_some_and(|n| n.is_ascii_digit()),

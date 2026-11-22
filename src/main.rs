@@ -205,11 +205,11 @@ fn merge_outputs(outputs: &[CheckOutput]) -> CheckOutput {
             },
         };
     }
-    if outputs.len() == 1 {
-        return outputs[0].clone();
+    if let [only] = outputs {
+        return only.clone();
     }
 
-    let names: Vec<&str> = outputs.iter().map(|o| o.plan_name.as_str()).collect();
+    let mut names: Vec<&str> = Vec::new();
     let mut all_inputs = Vec::new();
     let mut total = 0;
     let mut grounded = 0;
@@ -219,6 +219,7 @@ fn merge_outputs(outputs: &[CheckOutput]) -> CheckOutput {
     let mut contradictory = 0;
 
     for o in outputs {
+        names.push(o.plan_name.as_str());
         for input in &o.inputs {
             let mut prefixed = input.clone();
             prefixed.source = format!("{}: {}", o.plan_name, prefixed.source);
@@ -254,7 +255,9 @@ fn merge_outputs(outputs: &[CheckOutput]) -> CheckOutput {
 fn run_signature(change: Option<String>, stdin: bool) -> anyhow::Result<()> {
     let project_root = std::env::current_dir()?;
     let changes = resolve_changes(change.as_deref(), &project_root, stdin)?;
-    let (change_dir, _) = &changes[0];
+    let Some((change_dir, _)) = changes.first() else {
+        anyhow::bail!("No active changes found.");
+    };
 
     let tasks_path = change_dir.join("tasks.md");
     let tasks_source = std::fs::read_to_string(&tasks_path)
@@ -427,6 +430,13 @@ fn print_human(output: &CheckOutput) {
 }
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::string_slice,
+        clippy::panic
+    )]
     use crate::specs::extract_shall;
 
     #[test]

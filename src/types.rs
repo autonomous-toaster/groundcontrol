@@ -272,6 +272,13 @@ pub trait Grounder: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::string_slice,
+        clippy::panic
+    )]
     use super::*;
 
     #[test]

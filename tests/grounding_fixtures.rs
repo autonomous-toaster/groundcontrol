@@ -13,6 +13,10 @@
 //!
 //! then read the diff of `grounding_cases.json` before committing it.
 
+// This is an integration test binary, not shipped code: unwrap and panic are the
+// assertion mechanism here. The library it exercises denies them (see Cargo.toml).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use groundcontrol::grounders::RuleGrounder;
 use groundcontrol::types::*;
 use serde_json::{Value, json};

@@ -46,8 +46,8 @@ pub fn extract_requirements(source: &str, rel_path: &str, out: &mut Vec<Statemen
     let mut in_requirement = false;
     let mut req_line = 0;
 
-    while i < lines.len() {
-        let line = lines[i].trim();
+    while let Some(raw) = lines.get(i) {
+        let line = raw.trim();
 
         if line.starts_with("### Requirement:") || line.starts_with("### requirement:") {
             in_requirement = true;
@@ -59,8 +59,8 @@ pub fn extract_requirements(source: &str, rel_path: &str, out: &mut Vec<Statemen
         if in_requirement {
             // Collect body paragraphs until next heading
             let mut body = String::new();
-            while i < lines.len() {
-                let bl = lines[i].trim();
+            while let Some(raw) = lines.get(i) {
+                let bl = raw.trim();
                 if bl.starts_with("###") || bl.starts_with("####") {
                     break;
                 }
@@ -103,14 +103,16 @@ pub fn extract_shall(body: &str) -> String {
             let len = part.len();
             let mut i = 0;
             while i < len.saturating_sub(1) {
-                if bytes[i] == b'.' && bytes[i + 1] == b' ' {
+                let (Some(dot), Some(space)) = (bytes.get(i), bytes.get(i + 1)) else {
+                    break;
+                };
+                if *dot == b'.' && *space == b' ' {
                     // Check if this period is part of a task ID (digit before, digit after space)
                     let is_task_id = i > 0
-                        && bytes[i - 1].is_ascii_digit()
-                        && i + 2 < len
-                        && bytes[i + 2].is_ascii_digit();
-                    if !is_task_id {
-                        result.push(&part[start..i]);
+                        && bytes.get(i - 1).is_some_and(|b| b.is_ascii_digit())
+                        && bytes.get(i + 2).is_some_and(|b| b.is_ascii_digit());
+                    if !is_task_id && let Some(head) = part.get(start..i) {
+                        result.push(head);
                         start = i + 2;
                     }
                     i += 1;
@@ -118,7 +120,9 @@ pub fn extract_shall(body: &str) -> String {
                     i += 1;
                 }
             }
-            result.push(&part[start..]);
+            if let Some(tail) = part.get(start..) {
+                result.push(tail);
+            }
             result
         })
         .collect();

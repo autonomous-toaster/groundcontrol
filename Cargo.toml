@@ -1,6 +1,6 @@
 [package]
 name = "groundcontrol"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 
 [dependencies]
@@ -15,6 +15,24 @@ thiserror = "2"
 # Parsing
 tree-sitter = "0.26"
 tree-sitter-language-pack = "1"
+
+# Panics are forbidden in this crate. A consumer cannot turn a panic into a
+# finding, and an aborted process is not a verdict: it exits 101 with no output.
+# These lints are the enforcement - clippy fails the build on the constructs
+# that can panic. Set to deny rather than forbid so that test modules can opt
+# out with an explicit inner attribute; nothing outside them may.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+panic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,6 +1,13 @@
 //! Identifier tokenisation: multi-digit ids, byte-identity, boundary coverage.
 //! Regression tests for kata 08p0 (B1) and cdzv (B2).
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::panic
+)]
 use super::*;
 use crate::types::{ArgSlot, ConstantDef, GroundingStatus, PredicateDef, Signature, TypeDef};
 

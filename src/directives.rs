@@ -34,7 +34,9 @@ pub fn generate_directives(
         }
 
         GroundingStatus::Ambiguous => {
-            let best = &result.candidates[0];
+            let Some(best) = result.candidates.first() else {
+                return dirs;
+            };
             dirs.extend(alias_directives(best, stmt));
             if dirs.is_empty() {
                 dirs.push(Directive {
@@ -159,7 +161,7 @@ fn contradiction_directives(
                     .position(|b| b.constant == a.constant)
                     .map(|j| (i, i + 1 + j))
             })?;
-            let constant = &atom.arguments[first].constant;
+            let constant = atom.arguments.get(first).map(|a| a.constant.clone())?;
             Some(Directive {
                 severity: "blocker".to_string(),
                 element: stmt.source.clone(),

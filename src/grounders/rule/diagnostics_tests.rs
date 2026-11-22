@@ -1,5 +1,12 @@
 //! Diagnostics tests: absent identifiers, slot distinctness, match provenance.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::panic
+)]
 use super::tests::test_sig;
 use super::*;
 use crate::types::{ArgSlot, ConstantDef, MatchKind, PredicateDef, Signature, TypeDef};

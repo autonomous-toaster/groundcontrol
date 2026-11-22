@@ -31,7 +31,7 @@ pub fn signature_from_tasks(source: &str, _path: &Path) -> anyhow::Result<Signat
     let mut cursor = root.walk();
     explore_tree(&mut cursor, &root, &mut |node| match node.kind() {
         "atx_heading" => {
-            if let Ok(text) = helpers::node_text(node, bytes) {
+            if let Some(text) = helpers::node_text(node, bytes) {
                 let trimmed = text.trim().trim_start_matches('#').trim();
                 if !trimmed.is_empty() {
                     let level = node
@@ -53,7 +53,7 @@ pub fn signature_from_tasks(source: &str, _path: &Path) -> anyhow::Result<Signat
                 || helpers::find_child(node, "task_list_marker_checked").is_some();
             if checked
                 && let Some(content) = helpers::find_child(node, "paragraph")
-                && let Ok(text) = helpers::node_text(&content, bytes)
+                && let Some(text) = helpers::node_text(&content, bytes)
             {
                 let text = text.trim();
                 let (id, desc) = extract_task_id(text);
@@ -188,11 +188,10 @@ fn build_aliases(id: &str, desc: &str) -> Vec<String> {
 
     // First few words as a short alias
     let words: Vec<&str> = lower.split_whitespace().collect();
-    if words.len() > 3 {
-        aliases.push(words[..3].join(" "));
-    }
-    if words.len() > 5 {
-        aliases.push(words[..5].join(" "));
+    for n in [3, 5] {
+        if let Some(prefix) = words.get(..n) {
+            aliases.push(prefix.join(" "));
+        }
     }
 
     // Individual significant words (skip very short ones)
@@ -232,19 +231,17 @@ fn explore_tree<'a>(
 /// "T1.3 SHALL..." → ("1.3", "1.3")
 fn extract_task_id(text: &str) -> (String, String) {
     // Try N.M pattern first (bare, no T prefix — checklist items)
-    if let Some(space_pos) = text.find(' ') {
-        let candidate = &text[..space_pos];
-        if let Some(dot_pos) = candidate.find('.') {
-            let left = &candidate[..dot_pos];
-            let right = &candidate[dot_pos + 1..];
-            if !left.is_empty()
-                && !right.is_empty()
-                && left.chars().all(|c| c.is_ascii_digit())
-                && right.chars().all(|c| c.is_ascii_digit())
-            {
-                return (candidate.to_string(), text.to_string());
-            }
-        }
+    if let Some(space_pos) = text.find(' ')
+        && let Some(candidate) = text.get(..space_pos)
+        && let Some(dot_pos) = candidate.find('.')
+        && let Some(left) = candidate.get(..dot_pos)
+        && let Some(right) = candidate.get(dot_pos + 1..)
+        && !left.is_empty()
+        && !right.is_empty()
+        && left.chars().all(|c| c.is_ascii_digit())
+        && right.chars().all(|c| c.is_ascii_digit())
+    {
+        return (candidate.to_string(), text.to_string());
     }
 
     // Try T-prefixed: "T1.3" → id="1.3"
@@ -252,24 +249,26 @@ fn extract_task_id(text: &str) -> (String, String) {
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        // Skip opening parenthesis before T
-        let start_t = if i + 1 < bytes.len() && bytes[i] == b'(' && bytes[i + 1] == b'T' {
+        // Skip opening parenthesis before T. Every read is total; a malformed
+        // tail simply ends the scan.
+        let start = if bytes.get(i) == Some(&b'(') && bytes.get(i + 1) == Some(&b'T') {
             i + 2
-        } else if bytes[i] == b'T' {
+        } else if bytes.get(i) == Some(&b'T') {
             i + 1
         } else {
             i += 1;
             continue;
         };
-        let start = start_t;
         let mut end = start;
-        while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'.') {
+        while matches!(bytes.get(end), Some(b) if b.is_ascii_digit() || *b == b'.') {
             end += 1;
         }
         if end > start
-            && let Ok(s) = std::str::from_utf8(&bytes[start..end])
+            && let Some(slice) = bytes.get(start..end)
+            && let Ok(s) = std::str::from_utf8(slice)
+            && let Some(original) = text.get(start..end)
         {
-            return (s.to_string(), text[start..end].to_string());
+            return (s.to_string(), original.to_string());
         }
         i = end;
     }
@@ -279,6 +278,13 @@ fn extract_task_id(text: &str) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::string_slice,
+        clippy::panic
+    )]
     use super::*;
 
     #[test]

@@ -163,7 +163,7 @@ fn diagnostic_for(
             return format!(
                 "one constant ('{}') was bound to both slots, at least one by alias — \
                  name the tasks explicitly",
-                args[0].constant,
+                args.first().map(|a| a.constant.as_str()).unwrap_or("?"),
             );
         };
         let slot = |i: usize| {
@@ -176,7 +176,7 @@ fn diagnostic_for(
             "slots '{}' and '{}' require different tasks but '{}' fills both",
             slot(first),
             slot(second),
-            args[first].constant,
+            args.get(first).map(|a| a.constant.as_str()).unwrap_or("?"),
         );
     }
     let expected = pred_def.map(|p| p.arguments.len()).unwrap_or(0);
@@ -332,9 +332,10 @@ fn assign_arguments(
         "BEFORE" => {
             // "X BEFORE Y" → earlier=X, later=Y
             // Find the split point around "before"
-            if let Some(pos) = find_ci(nl, "before") {
-                let before_text = &nl[..pos];
-                let after_text = &nl[pos + 6..];
+            if let Some(pos) = find_ci(nl, "before")
+                && let Some(before_text) = nl.get(..pos)
+                && let Some(after_text) = nl.get(pos + 6..)
+            {
                 let before_match = bind_slot(matched, before_text, allow_alias);
                 let after_match = bind_slot(matched, after_text, allow_alias);
                 let mut args = Vec::new();
@@ -351,9 +352,10 @@ fn assign_arguments(
         }
         "AFTER" => {
             // "X AFTER Y" → earlier=Y, later=X
-            if let Some(pos) = find_ci(nl, "after") {
-                let before_text = &nl[..pos];
-                let after_text = &nl[pos + 5..];
+            if let Some(pos) = find_ci(nl, "after")
+                && let Some(before_text) = nl.get(..pos)
+                && let Some(after_text) = nl.get(pos + 5..)
+            {
                 let before_match = bind_slot(matched, before_text, allow_alias);
                 let after_match = bind_slot(matched, after_text, allow_alias);
                 let mut args = Vec::new();
@@ -372,11 +374,12 @@ fn assign_arguments(
         "CONCURRENTLY" | "AT_MOST_ONE" => take(2),
         "IF_THEN" => {
             // "IF X fails THEN Y" → trigger=X, consequent=Y
-            if let Some(if_pos) = find_ci(nl, "if") {
-                let after_if = &nl[if_pos + 2..];
+            if let Some(if_pos) = find_ci(nl, "if")
+                && let Some(after_if) = nl.get(if_pos + 2..)
+            {
                 let then_pos = find_ci(after_if, "then");
-                let trigger_text = &after_if[..then_pos.unwrap_or(after_if.len())];
-                let consequent_text = then_pos.map(|p| &after_if[p + 4..]).unwrap_or("");
+                let trigger_text = then_pos.and_then(|p| after_if.get(..p)).unwrap_or(after_if);
+                let consequent_text = then_pos.and_then(|p| after_if.get(p + 4..)).unwrap_or("");
                 let trigger = bind_slot(matched, trigger_text, allow_alias);
                 let consequent = bind_slot(matched, consequent_text, allow_alias);
                 let mut args = Vec::new();
