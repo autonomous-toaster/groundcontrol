@@ -75,27 +75,18 @@ fn cases() -> Vec<(&'static str, Signature, &'static str)> {
         // B3: a single-slot predicate follows the text, not the signature.
         (
             "single_slot_subject_is_later_in_signature",
-            signature(
-                vec![one_slot("ALWAYS")],
-                vec![task("T1.1"), task("T1.10")],
-            ),
+            signature(vec![one_slot("ALWAYS")], vec![task("T1.1"), task("T1.10")]),
             "T1.10 SHALL ALWAYS mention T1.1",
         ),
         (
             "single_slot_reversed_sentence",
-            signature(
-                vec![one_slot("ALWAYS")],
-                vec![task("T1.1"), task("T1.10")],
-            ),
+            signature(vec![one_slot("ALWAYS")], vec![task("T1.1"), task("T1.10")]),
             "T1.1 SHALL ALWAYS mention T1.10",
         ),
         // B1: a foreign multi-digit identifier is reported verbatim.
         (
             "absent_multi_digit_identifier",
-            signature(
-                vec![two_slot("BEFORE")],
-                vec![task("T1.1"), task("T1.2")],
-            ),
+            signature(vec![two_slot("BEFORE")], vec![task("T1.1"), task("T1.2")]),
             "T2.10 SHALL complete BEFORE T1.1 SHALL start.",
         ),
         (
@@ -124,13 +115,21 @@ fn cases() -> Vec<(&'static str, Signature, &'static str)> {
             ),
             "The migration must finish before testing starts",
         ),
+        // 9kvc: non-ASCII text is ordinary in specs and must yield a verdict.
+        (
+            "multibyte_arrow_after_identifier",
+            signature(vec![two_slot("BEFORE")], vec![task("T1.1")]),
+            "T1.1 SHALL forward the upstream status during H2→H1.1 transcoding.",
+        ),
+        (
+            "lowercase_expansion_keyword_at_end",
+            signature(vec![two_slot("BEFORE")], vec![task("T1.1")]),
+            "İİİİİİ T1.1 SHALL complete before",
+        ),
         // D2: a self-relation is contradictory, not a low-confidence match.
         (
             "self_relation_is_contradictory",
-            signature(
-                vec![two_slot("BEFORE")],
-                vec![task("T1.1"), task("T1.2")],
-            ),
+            signature(vec![two_slot("BEFORE")], vec![task("T1.1"), task("T1.2")]),
             "T1.1 SHALL write the header BEFORE T1.1 SHALL seal it",
         ),
     ]

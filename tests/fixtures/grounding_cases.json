@@ -151,6 +151,40 @@
   },
   {
     "expected": {
+      "absent_identifiers": [
+        "H1.1"
+      ],
+      "candidates": [],
+      "status": "incomplete",
+      "unused_identifiers": []
+    },
+    "name": "multibyte_arrow_after_identifier",
+    "text": "T1.1 SHALL forward the upstream status during H2→H1.1 transcoding."
+  },
+  {
+    "expected": {
+      "absent_identifiers": [],
+      "candidates": [
+        {
+          "arguments": [
+            {
+              "constant": "T1.1",
+              "kind": "name"
+            }
+          ],
+          "confidence": 0.5,
+          "exact": true,
+          "predicate": "BEFORE"
+        }
+      ],
+      "status": "incomplete",
+      "unused_identifiers": []
+    },
+    "name": "lowercase_expansion_keyword_at_end",
+    "text": "İİİİİİ T1.1 SHALL complete before"
+  },
+  {
+    "expected": {
       "absent_identifiers": [],
       "candidates": [
         {

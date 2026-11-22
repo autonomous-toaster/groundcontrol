@@ -13,7 +13,7 @@ use crate::types::{
     MatchKind, PredicateDef, Signature,
 };
 
-use identifiers::{appears_in, contains_name, extract_absent_identifiers, name_index};
+use identifiers::{appears_in, contains_name, extract_absent_identifiers, find_ci, name_index};
 
 mod identifiers;
 
@@ -76,7 +76,7 @@ impl Grounder for RuleGrounder {
             // this signature does not declare, the alias may well describe one of
             // those instead. Prefer "unknown constant" over a guessed binding.
             let allow_alias = absent_identifiers.is_empty();
-            let args = assign_arguments(pred_name, &matched_constants, nl, &lower, allow_alias);
+            let args = assign_arguments(pred_name, &matched_constants, nl, allow_alias);
 
             // 5. Distinctness: a predicate that distinguishes its slots must not
             // receive the same constant twice. Only a *name* match in both slots
@@ -319,7 +319,6 @@ fn assign_arguments(
     pred_name: &str,
     matched: &[&ConstantDef],
     nl: &str,
-    lower: &str,
     allow_alias: bool,
 ) -> Vec<BoundArgument> {
     let take = |n: usize| -> Vec<BoundArgument> {
@@ -333,7 +332,7 @@ fn assign_arguments(
         "BEFORE" => {
             // "X BEFORE Y" → earlier=X, later=Y
             // Find the split point around "before"
-            if let Some(pos) = lower.find("before") {
+            if let Some(pos) = find_ci(nl, "before") {
                 let before_text = &nl[..pos];
                 let after_text = &nl[pos + 6..];
                 let before_match = bind_slot(matched, before_text, allow_alias);
@@ -352,7 +351,7 @@ fn assign_arguments(
         }
         "AFTER" => {
             // "X AFTER Y" → earlier=Y, later=X
-            if let Some(pos) = lower.find("after") {
+            if let Some(pos) = find_ci(nl, "after") {
                 let before_text = &nl[..pos];
                 let after_text = &nl[pos + 5..];
                 let before_match = bind_slot(matched, before_text, allow_alias);
@@ -373,15 +372,11 @@ fn assign_arguments(
         "CONCURRENTLY" | "AT_MOST_ONE" => take(2),
         "IF_THEN" => {
             // "IF X fails THEN Y" → trigger=X, consequent=Y
-            if let Some(if_pos) = lower.find("if") {
-                let after_if = &lower[if_pos + 2..];
-                let then_pos = after_if.find("then").unwrap_or(usize::MAX);
-                let trigger_text = &nl[if_pos + 2..if_pos + 2 + then_pos.min(after_if.len())];
-                let consequent_text = if then_pos < after_if.len() {
-                    &nl[if_pos + 2 + then_pos + 4..]
-                } else {
-                    ""
-                };
+            if let Some(if_pos) = find_ci(nl, "if") {
+                let after_if = &nl[if_pos + 2..];
+                let then_pos = find_ci(after_if, "then");
+                let trigger_text = &after_if[..then_pos.unwrap_or(after_if.len())];
+                let consequent_text = then_pos.map(|p| &after_if[p + 4..]).unwrap_or("");
                 let trigger = bind_slot(matched, trigger_text, allow_alias);
                 let consequent = bind_slot(matched, consequent_text, allow_alias);
                 let mut args = Vec::new();
@@ -422,17 +417,13 @@ fn bind_first_in_text(
     nl: &str,
     allow_alias: bool,
 ) -> Option<BoundArgument> {
-    let lower = nl.to_lowercase();
     let first = matched
         .iter()
         .enumerate()
         .filter_map(|(order, c)| {
             let by_name = name_index(nl, &c.name);
             let by_alias = if allow_alias {
-                c.aliases
-                    .iter()
-                    .filter_map(|a| name_index(&lower, &a.to_lowercase()))
-                    .min()
+                c.aliases.iter().filter_map(|a| find_ci(nl, a)).min()
             } else {
                 None
             };

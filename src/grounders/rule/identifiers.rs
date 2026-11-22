@@ -77,6 +77,15 @@ pub(super) fn extract_absent_identifiers(nl: &str, sig: &Signature) -> Vec<Strin
     let known: std::collections::HashSet<&str> =
         sig.constants.iter().map(|c| c.name.as_str()).collect();
     let chars: Vec<char> = nl.chars().collect();
+    // The scanner walks in character indices so that a candidate cannot be cut
+    // mid-character, but the boundary predicates take *byte* offsets (they slice
+    // the string). Keep the mapping and never pass one where the other is meant:
+    // mixing them panics inside a multi-byte character, e.g. on "H2→H1.1".
+    let offsets: Vec<usize> = nl
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .chain(std::iter::once(nl.len()))
+        .collect();
     let mut absent: Vec<String> = Vec::new();
 
     // For each start position, try every length and shape; record the longest
@@ -94,7 +103,12 @@ pub(super) fn extract_absent_identifiers(nl: &str, sig: &Signature) -> Vec<Strin
             let end = i + len;
             let candidate: String = chars[i..end].iter().collect();
             let shape = name_shape(&candidate);
-            if fits_any(&shape, &patterns) && boundary_before(nl, i) && boundary_after(nl, end) {
+            // `offsets[i]` / `offsets[end]` convert character indices to byte
+            // offsets; `end <= chars.len()` always, so the table covers them.
+            if fits_any(&shape, &patterns)
+                && boundary_before(nl, offsets[i])
+                && boundary_after(nl, offsets[end])
+            {
                 best = Some(len);
             }
         }
@@ -137,6 +151,37 @@ pub(super) fn appears_in(c: &ConstantDef, nl: &str, lower: &str) -> bool {
 /// counts when neither side continues the identifier.
 pub(super) fn contains_name(text: &str, name: &str) -> bool {
     name_index(text, name).is_some()
+}
+
+/// Byte offset of the first case-insensitive occurrence of `needle` in `haystack`.
+///
+/// Case-insensitive matching must not go through a lowercased copy: lowercasing
+/// can change byte length (U+0130 "İ" becomes "i̇", 2 bytes to 3), so an offset
+/// found in the copy is not a valid offset in the original and slicing there
+/// panics inside a multi-byte character. Everything here returns offsets in
+/// `haystack` itself, and only ever slices at `char_indices` boundaries.
+pub(super) fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    let wanted = needle.chars().count();
+    for (byte, _) in haystack.char_indices() {
+        let mut hay = haystack[byte..].chars();
+        let mut matched = true;
+        for n in needle.chars() {
+            match hay.next() {
+                Some(h) if h.eq_ignore_ascii_case(&n) => {}
+                _ => {
+                    matched = false;
+                    break;
+                }
+            }
+        }
+        if matched && haystack[byte..].chars().take(wanted).count() == wanted {
+            return Some(byte);
+        }
+    }
+    None
 }
 
 /// Byte offset of the first boundary-valid occurrence of `name` in `text`.

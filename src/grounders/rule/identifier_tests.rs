@@ -180,3 +180,109 @@ fn test_single_slot_binding_by_alias_is_reported_as_an_alias() {
     assert_eq!(result.candidates[0].confidence, 0.9);
     assert_eq!(result.status, GroundingStatus::Grounded);
 }
+
+// ── 9kvc: non-ASCII text must never panic the scanner ──
+
+fn id_sig(names: &[&str]) -> Signature {
+    Signature {
+        types: vec![TypeDef {
+            name: "task_id".into(),
+        }],
+        predicates: vec![PredicateDef {
+            name: "BEFORE".into(),
+            arguments: vec![
+                ArgSlot {
+                    name: "earlier".into(),
+                    type_name: "task_id".into(),
+                },
+                ArgSlot {
+                    name: "later".into(),
+                    type_name: "task_id".into(),
+                },
+            ],
+        }],
+        constants: names
+            .iter()
+            .map(|n| ConstantDef {
+                name: (*n).to_string(),
+                type_name: "task_id".into(),
+                aliases: vec![],
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn test_arrow_after_a_task_id_does_not_panic() {
+    // The reported repro: a multi-byte character the scanner must step over.
+    let sig = id_sig(&["T1.1"]);
+    let result = RuleGrounder.ground(
+        "T1.1 SHALL forward the upstream status during H2\u{2192}H1.1 transcoding.",
+        &sig,
+    );
+    assert!(result.absent_identifiers.contains(&"H1.1".to_string()));
+}
+
+#[test]
+fn test_em_dash_between_tasks_does_not_panic() {
+    let sig = id_sig(&["T1.1", "T2.2"]);
+    let result = RuleGrounder.ground("T1.1 SHALL complete \u{2014} BEFORE T2.2 SHALL start", &sig);
+    assert_eq!(result.candidates[0].names(), vec!["T1.1", "T2.2"]);
+}
+
+#[test]
+fn test_accented_text_around_identifiers_does_not_panic() {
+    let sig = id_sig(&["T1.1", "T2.2"]);
+    let result = RuleGrounder.ground(
+        "T1.1 SHALL renommer la t\u{e2}che caf\u{e9} BEFORE T2.2 SHALL start",
+        &sig,
+    );
+    assert_eq!(result.candidates[0].names(), vec!["T1.1", "T2.2"]);
+}
+
+#[test]
+fn test_lowercase_expansion_does_not_panic() {
+    // U+0130 lowercases to two chars, so an offset taken from a lowercased copy
+    // overruns the original. The keyword sits at the very end to force it.
+    let sig = id_sig(&["T1.1"]);
+    for n in 1..10 {
+        let text = format!("{} T1.1 SHALL complete before", "\u{130}".repeat(n));
+        let _ = RuleGrounder.ground(&text, &sig);
+    }
+}
+
+#[test]
+fn test_no_panic_across_multibyte_padding_and_keyword_positions() {
+    let sig = id_sig(&["T1.1"]);
+    let pads = [
+        "\u{2192}",
+        "\u{2014}",
+        "\u{e9}",
+        "\u{4e00}",
+        "\u{130}",
+        "\u{1f600}",
+    ];
+    let shapes = [
+        "{p}{p}{p} T1.1 SHALL complete before T2.2 SHALL start",
+        "T1.1 SHALL complete before {p}{p}{p} T2.2 SHALL start",
+        "{p}{p}{p} T1.1 SHALL complete before",
+        "{p} T1.1 SHALL complete AFTER {p} T2.2 SHALL start",
+        "{p}{p} IF T1.1 fails THEN {p} T2.2 SHALL start",
+        "{p}{p}{p} T1.1 SHALL ALWAYS {p} hold",
+    ];
+    for pad in pads {
+        for shape in shapes {
+            let text = shape.replace("{p}", pad);
+            let _ = RuleGrounder.ground(&text, &sig);
+        }
+    }
+}
+
+#[test]
+fn test_multibyte_text_still_grounds_on_the_named_tasks() {
+    // Correctness, not just absence of panic: the arrow must not hide a binding.
+    let sig = id_sig(&["T1.1", "T2.2"]);
+    let result = RuleGrounder.ground("T1.1 SHALL serve \u{2192} T2.2 SHALL start AFTER it", &sig);
+    assert_eq!(result.candidates[0].predicate, "AFTER");
+    assert!(result.candidates[0].names().contains(&"T1.1"));
+}
